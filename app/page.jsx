@@ -101,6 +101,8 @@ function AuthProvider({ children }) {
       sat: "",
       act: "",
       intended_major: "",
+      avatar_url: "",
+      social_links: {},
     };
     const { error: insertError } = await supabase.from("users").insert([profile]);
     if (insertError) return { ok: false, error: insertError.message };
@@ -498,11 +500,11 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
   );
 }
 
-function LobbyPage({ groups, setGroups }) {
+function LobbyPage({ groups, setGroups, initCat }) {
   const { user } = useAuth();
   const toast    = useToast();
   const [q, setQ]         = useState("");
-  const [cat, setCat]     = useState("all");
+  const [cat, setCat]     = useState(initCat || "all");
   const [fmt, setFmt]     = useState("all");
   const [modal, setModal] = useState(false);
 
@@ -573,7 +575,7 @@ function LobbyPage({ groups, setGroups }) {
 function AdvisorPage({ goLobby, goProfile }) {
   const toast = useToast();
   const { user } = useAuth();
-  const [f, setF]           = useState({ gpa:"", sat:"", act:"", major:"", interests:"", activities:"" });
+  const [f, setF]           = useState({ gpa:"", sat:"", act:"", major:"" });
   const [loading, setLoading] = useState(false);
   const [res, setRes]       = useState(null);
   const [caLoading, setCaLoading] = useState(false);
@@ -587,7 +589,7 @@ function AdvisorPage({ goLobby, goProfile }) {
 
   async function analyze() {
     if (!f.major) { toast("Please enter your intended major.", "warning"); return; }
-    if (!passesContentPolicy(f.interests + f.activities)) { toast("Content not allowed.", "error"); return; }
+    if (!passesContentPolicy(f.major)) { toast("Content not allowed.", "error"); return; }
     if (remaining <= 0) { toast("AI request limit reached. Try again in a minute.", "error"); return; }
     setLoading(true); setRes(null);
     try {
@@ -597,17 +599,23 @@ function AdvisorPage({ goLobby, goProfile }) {
       const profileAwds = user?.awards?.length
         ? user.awards.map(a => a.title).join("; ")
         : null;
-      const activitiesStr = profileActs || sanitize(f.activities) || "None";
+      const activitiesStr = profileActs || "None";
       const awardsLine = profileAwds ? ` Awards:${profileAwds}` : "";
       const sys = `You are an expert college admissions counselor. Return ONLY valid JSON (no markdown, no backticks) with this exact shape:
 {"summary":"string","schools":[{"name":"","tier":"Reach|Match|Safety","reason":""}],"strengths":[""],"gaps":[""],"activities":[{"name":"","why":"","category":"stem|premed|biz|arts|social|law|env|sports"}]}
 Rules: 5-7 schools, 4-6 activities, be specific and realistic.`;
       const raw  = await callClaude(sys,
-        `GPA:${sanitize(f.gpa)||"N/A"} SAT:${sanitize(f.sat)||"N/A"} ACT:${sanitize(f.act)||"N/A"} Major:${sanitize(f.major)} Interests:${sanitize(f.interests)||"N/A"} Activities:${activitiesStr}${awardsLine}`,
+        `GPA:${sanitize(f.gpa)||"N/A"} SAT:${sanitize(f.sat)||"N/A"} ACT:${sanitize(f.act)||"N/A"} Major:${sanitize(f.major)} Activities:${activitiesStr}${awardsLine}`,
         [], { maxTokens: 1200 }
       );
       const parsed = JSON.parse(raw.replace(/```json|```/g,"").trim());
       if (!parsed.schools || !parsed.activities) throw new Error("bad shape");
+      // Filter out activities the user already has
+      const userActNames = (user?.activities || []).flatMap(a => [a.org_name, a.position].filter(s => s && s.length > 3).map(s => s.toLowerCase()));
+      parsed.activities = parsed.activities.filter(a => {
+        const name = (a.name || "").toLowerCase();
+        return !userActNames.some(existing => name.includes(existing) || existing.includes(name));
+      });
       setRes(parsed);
     } catch(e) {
       if (e.message === "RATE_LIMITED") toast("Rate limit reached. Wait 1 minute.", "error");
@@ -653,9 +661,8 @@ Rules:
       const profileAwds = user?.awards?.length
         ? user.awards.map(a => `${a.title} (${Array.isArray(a.recognition) ? a.recognition.join("/") : a.recognition})`).join(", ")
         : null;
-      const activitiesContext = profileActs || f.activities || "None";
+      const activitiesContext = profileActs || "None";
       const prompt = `Student major: ${f.major}
-Interests: ${f.interests}
 Current activities: ${activitiesContext}${profileAwds ? `\nHonors/Awards: ${profileAwds}` : ""}
 GPA: ${f.gpa}, SAT: ${f.sat}, ACT: ${f.act}
 Advisor recommended activities: ${res.activities.map(a => `${a.name}: ${a.why}`).join(', ')}`;
@@ -692,14 +699,26 @@ Advisor recommended activities: ${res.activities.map(a => `${a.name}: ${a.why}`)
               <div><label>ACT Score</label>      <input value={f.act}   onChange={e=>set("act",e.target.value)}   placeholder="32" maxLength={4}/></div>
               <div><label>Intended Major *</label><input value={f.major} onChange={e=>set("major",e.target.value)} placeholder="Mech. Engineering" maxLength={80}/></div>
             </div>
-            <div><label>Interests & Hobbies</label><input value={f.interests}  onChange={e=>set("interests",e.target.value)}  placeholder="robotics, writing…" maxLength={200}/></div>
             <div>
-                <label>
-                  Current Activities
-                  {user?.activities?.length > 0 && <span style={{ color:"var(--green)", fontSize:".6rem", fontWeight:700, marginLeft:".5rem" }}>✓ {user.activities.length} from profile</span>}
-                </label>
-                <textarea rows={2} value={f.activities} onChange={e=>set("activities",e.target.value)} placeholder={user?.activities?.length > 0 ? "Profile activities used — type here to override…" : "school band, JV soccer…"} maxLength={400}/>
-              </div>
+              <label style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                Current Activities
+                {user?.activities?.length > 0 && <span style={{ color:"var(--green)", fontSize:".6rem", fontWeight:700 }}>✓ {user.activities.length} from profile</span>}
+              </label>
+              {user?.activities?.length > 0 ? (
+                <div style={{ display:"flex", flexDirection:"column", gap:".4rem", maxHeight:200, overflowY:"auto", padding:".2rem 0" }}>
+                  {user.activities.map((a, i) => (
+                    <div key={i} style={{ padding:".5rem .7rem", background:"var(--paper2)", border:"1px solid var(--paper3)", fontSize:".78rem" }}>
+                      <div style={{ fontWeight:700, fontSize:".7rem", letterSpacing:".05em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".15rem" }}>{a.activity_type}</div>
+                      <div style={{ fontWeight:600 }}>{a.position}{a.org_name ? <span style={{ fontWeight:400, color:"var(--muted)" }}> · {a.org_name}</span> : null}</div>
+                      {a.description && <div style={{ color:"var(--muted)", marginTop:".1rem", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".75rem" }}>{a.description}</div>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ padding:".6rem .7rem", background:"var(--paper2)", border:"1px solid var(--paper3)", fontSize:".8rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>No activities on profile yet.</div>
+              )}
+              {goProfile && <button className="btn btn-ghost btn-sm" onClick={goProfile} style={{ marginTop:".4rem", fontSize:".68rem" }}>Edit in Profile →</button>}
+            </div>
             <button className="btn btn-orange" onClick={analyze} disabled={loading||!f.major} style={{ marginTop:".4rem", width:"100%", justifyContent:"center" }}>
               {loading ? <><Spinner size={14}/>Analyzing…</> : "Analyze My Profile →"}
             </button>
@@ -774,7 +793,7 @@ Advisor recommended activities: ${res.activities.map(a => `${a.name}: ${a.why}`)
                     </div>
                   ))}
                 </div>
-                <button className="btn btn-orange" style={{ width:"100%", justifyContent:"center" }} onClick={goLobby}>Find Groups in Lobby →</button>
+                <button className="btn btn-orange" style={{ width:"100%", justifyContent:"center" }} onClick={() => goLobby([...new Set((res?.activities||[]).map(a=>a.category).filter(Boolean))])}>Find Groups in Lobby →</button>
                 <button className="btn" style={{ width:"100%", justifyContent:"center", marginTop:".6rem", background:"var(--ink)", color:"var(--paper)" }} onClick={formatForCommonApp} disabled={caLoading}>
                   {caLoading ? <><Spinner size={14}/>Formatting…</> : "Format for Common App →"}
                 </button>
@@ -1187,6 +1206,12 @@ function ProfilePage() {
   const [awards, setAwards]         = useState(user?.awards || []);
   const [saving, setSaving]         = useState(false);
   const [acadSaving, setAcadSaving] = useState(false);
+  const [avatarUrl, setAvatarUrl]   = useState(user?.avatar_url || "");
+  const [avatarHover, setAvatarHover] = useState(false);
+  const [uploading, setUploading]   = useState(false);
+  const [links, setLinks]           = useState({ linkedin: user?.social_links?.linkedin || "", instagram: user?.social_links?.instagram || "", email: user?.social_links?.email || "", whatsapp: user?.social_links?.whatsapp || "" });
+  const [linksSaving, setLinksSaving] = useState(false);
+  const fileInputRef = useRef(null);
   const sa = (k, v) => setAcad(p => ({...p, [k]: v}));
 
   const blankActivity = () => ({
@@ -1194,6 +1219,38 @@ function ProfilePage() {
     grades: [], timing: "During school year", hours_per_week: 0, weeks_per_year: 0,
   });
   const blankAward = () => ({ title: "", grades: [], recognition: [] });
+
+  async function uploadAvatar(file) {
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { toast("Image must be under 5MB.", "warning"); return; }
+    setUploading(true);
+    const ext = file.name.split(".").pop();
+    const path = `${user.id}.${ext}`;
+    const { error: upErr } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
+    if (upErr) { toast("Upload failed. Try again.", "error"); setUploading(false); return; }
+    const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+    const url = data.publicUrl;
+    const { error: dbErr } = await supabase.from("users").update({ avatar_url: url }).eq("id", user.id);
+    if (dbErr) { toast("Save failed. Try again.", "error"); setUploading(false); return; }
+    setAvatarUrl(url);
+    updateProfile({ avatar_url: url });
+    toast("Photo updated!", "success");
+    setUploading(false);
+  }
+
+  async function saveLinks() {
+    setLinksSaving(true);
+    const cleaned = {
+      linkedin: sanitize(links.linkedin, 200),
+      instagram: sanitize(links.instagram, 60).replace(/^@/, ""),
+      email: sanitize(links.email, 120),
+      whatsapp: sanitize(links.whatsapp, 20).replace(/\D/g, ""),
+    };
+    const { error } = await supabase.from("users").update({ social_links: cleaned }).eq("id", user.id);
+    if (error) toast("Save failed. Try again.", "error");
+    else { updateProfile({ social_links: cleaned }); toast("Links saved!", "success"); }
+    setLinksSaving(false);
+  }
 
   function saveBio() {
     const clean = sanitize(bio, 300);
@@ -1229,6 +1286,7 @@ function ProfilePage() {
       intended_major: sanitize(acad.intended_major, 80),
       activities: cleanActs,
       awards,
+      social_links: links,
     };
     const { error } = await supabase.from("users").update(updates).eq("id", user.id);
     if (error) toast("Save failed. Try again.", "error");
@@ -1256,9 +1314,42 @@ function ProfilePage() {
       {/* Identity */}
       <div className="card" style={{ marginBottom:"1.2rem" }}>
         <div style={{ display:"flex", alignItems:"center", gap:"1.2rem", marginBottom:"1.2rem" }}>
-          <div style={{ width:60, height:60, border:"3px solid var(--orange)", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"var(--font-display)", fontSize:"1.4rem", background:"var(--orange-lt)", color:"var(--orange)" }}>{user?.avatar}</div>
-          <div>
-            <div style={{ fontWeight:700, fontSize:"1.1rem" }}>{user?.name}</div>
+          {/* Circular avatar with hover upload overlay */}
+          <div
+            style={{ position:"relative", width:68, height:68, borderRadius:"50%", border:"3px solid var(--orange)", flexShrink:0, cursor:"pointer", overflow:"hidden" }}
+            onMouseEnter={() => setAvatarHover(true)}
+            onMouseLeave={() => setAvatarHover(false)}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {avatarUrl ? (
+              <img src={avatarUrl} alt="avatar" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }}/>
+            ) : (
+              <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"var(--font-display)", fontSize:"1.4rem", background:"var(--orange-lt)", color:"var(--orange)" }}>{user?.avatar}</div>
+            )}
+            {avatarHover && (
+              <div style={{ position:"absolute", inset:0, background:"rgba(0,0,0,.45)", display:"flex", alignItems:"center", justifyContent:"center", borderRadius:"50%" }}>
+                {uploading ? <Spinner size={18}/> : <span style={{ fontSize:"1.2rem" }}>📷</span>}
+              </div>
+            )}
+            <input ref={fileInputRef} type="file" accept="image/*" style={{ display:"none" }} onChange={e => { const f = e.target.files?.[0]; if (f) uploadAvatar(f); e.target.value = ""; }}/>
+          </div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:".6rem", flexWrap:"wrap" }}>
+              <div style={{ fontWeight:700, fontSize:"1.1rem" }}>{user?.name}</div>
+              {/* Social icons next to name */}
+              {user?.social_links?.linkedin && (
+                <a href={user.social_links.linkedin} target="_blank" rel="noopener noreferrer" style={{ fontSize:".75rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .35rem", textDecoration:"none", color:"var(--ink)", letterSpacing:".04em" }}>in</a>
+              )}
+              {user?.social_links?.instagram && (
+                <a href={`https://instagram.com/${user.social_links.instagram}`} target="_blank" rel="noopener noreferrer" style={{ fontSize:".75rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .35rem", textDecoration:"none", color:"var(--ink)" }}>@</a>
+              )}
+              {user?.social_links?.email && (
+                <a href={`mailto:${user.social_links.email}`} style={{ fontSize:".75rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .35rem", textDecoration:"none", color:"var(--ink)" }}>✉</a>
+              )}
+              {user?.social_links?.whatsapp && (
+                <a href={`https://wa.me/${user.social_links.whatsapp}`} target="_blank" rel="noopener noreferrer" style={{ fontSize:".75rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .35rem", textDecoration:"none", color:"var(--ink)" }}>WA</a>
+              )}
+            </div>
             <div style={{ fontSize:".75rem", color:"var(--muted)", marginTop:".2rem" }}>{user?.email}</div>
             <span className="tag tag-blue" style={{ fontSize:".6rem", marginTop:".3rem" }}>{user?.role}</span>
           </div>
@@ -1279,6 +1370,31 @@ function ProfilePage() {
               <button className="btn btn-ghost btn-sm" onClick={()=>setBioEdit(true)} style={{ flexShrink:0 }}>Edit</button>
             </div>
           )}
+        </div>
+        {/* Social links editing section */}
+        <div style={{ borderTop:"1.5px solid var(--paper3)", paddingTop:"1rem", marginTop:"1rem" }}>
+          <label style={{ marginBottom:".6rem", display:"block" }}>Social Links</label>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".55rem", marginBottom:".75rem" }}>
+            <div>
+              <label style={{ fontSize:".65rem", letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)", fontWeight:700 }}>LinkedIn URL</label>
+              <input value={links.linkedin} onChange={e=>setLinks(p=>({...p,linkedin:e.target.value}))} placeholder="https://linkedin.com/in/…" maxLength={200}/>
+            </div>
+            <div>
+              <label style={{ fontSize:".65rem", letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)", fontWeight:700 }}>Instagram Handle</label>
+              <input value={links.instagram} onChange={e=>setLinks(p=>({...p,instagram:e.target.value}))} placeholder="@yourhandle" maxLength={60}/>
+            </div>
+            <div>
+              <label style={{ fontSize:".65rem", letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)", fontWeight:700 }}>Email</label>
+              <input value={links.email} onChange={e=>setLinks(p=>({...p,email:e.target.value}))} placeholder="you@email.com" maxLength={120}/>
+            </div>
+            <div>
+              <label style={{ fontSize:".65rem", letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)", fontWeight:700 }}>WhatsApp Number</label>
+              <input value={links.whatsapp} onChange={e=>setLinks(p=>({...p,whatsapp:e.target.value}))} placeholder="+1 555 123 4567" maxLength={20}/>
+            </div>
+          </div>
+          <button className="btn btn-sm" onClick={saveLinks} disabled={linksSaving} style={{ width:"100%", justifyContent:"center" }}>
+            {linksSaving ? <><Spinner size={12}/>Saving…</> : "Save Links →"}
+          </button>
         </div>
       </div>
 
@@ -1520,6 +1636,7 @@ function AppShell() {
   const [page, setPage]         = useState("lobby");
   const [groups, setGroups]     = useState(null);
   const [jumpGroup, setJumpGroup] = useState(null);
+  const [lobbyFilter, setLobbyFilter] = useState("all");
 
   useEffect(() => { DB.load("groups", null).then(d => setGroups(d || SEED_GROUPS)); }, []);
   useEffect(() => { if (groups) DB.save("groups", groups); }, [groups]);
@@ -1546,13 +1663,13 @@ function AppShell() {
     <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column" }}>
       <header style={{ borderBottom:"2px solid var(--ink)", background:"var(--paper)", position:"sticky", top:0, zIndex:50, flexShrink:0 }}>
         <div style={{ maxWidth:fullPage?"100%":1160, margin:"0 auto", padding:"0 1.4rem", height:58, display:"flex", alignItems:"center", gap:"1.4rem" }}>
-          <div onClick={() => setPage("lobby")} style={{ cursor:"pointer", flexShrink:0, display:"flex", alignItems:"baseline" }}>
+          <div onClick={() => { setLobbyFilter("all"); setPage("lobby"); }} style={{ cursor:"pointer", flexShrink:0, display:"flex", alignItems:"baseline" }}>
             <span style={{ fontFamily:"var(--font-display)", fontSize:"1.35rem", letterSpacing:".05em" }}>EXTRA</span>
             <span style={{ fontFamily:"var(--font-display)", fontSize:"1.35rem", letterSpacing:".05em", color:"var(--orange)" }}>CREW</span>
           </div>
           <nav style={{ display:"flex", alignItems:"center", flex:1, overflowX:"auto", gap:".1rem" }}>
             {PAGES.map(p => (
-              <button key={p.id} className={`nav-link ${page===p.id?"active":""}`} onClick={() => setPage(p.id)}>
+              <button key={p.id} className={`nav-link ${page===p.id?"active":""}`} onClick={() => { if (p.id === "lobby") setLobbyFilter("all"); setPage(p.id); }}>
                 {p.icon} {p.label}
               </button>
             ))}
@@ -1565,8 +1682,8 @@ function AppShell() {
       </header>
 
       <main style={{ flex:1, overflow:fullPage?"hidden":"auto" }}>
-        {page==="lobby"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups}/></div>}
-        {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={()=>setPage("lobby")} goProfile={()=>setPage("profile")}/></div>}
+        {page==="lobby"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups} initCat={lobbyFilter}/></div>}
+        {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={(cats) => { setLobbyFilter(cats?.[0] || "all"); setPage("lobby"); }} goProfile={()=>setPage("profile")}/></div>}
         {page==="mygroups" && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><MyGroupsPage groups={groups} setGroups={setGroups} goChat={goChat}/></div>}
         {page==="messages" && <ChatPage groups={groups} jumpGroup={jumpGroup}/>}
         {page==="aichat"   && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><AIChatPage/></div>}
