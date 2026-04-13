@@ -1,9 +1,12 @@
 "use client";
 
 import { useState, useEffect, useRef, createContext, useContext } from "react";
-import { sanitize, Validators, passesContentPolicy, ClientRateLimit, generateSessionToken, verifySessionToken } from "@/lib/security";
+import { sanitize, Validators, passesContentPolicy, ClientRateLimit } from "@/lib/security";
 import { callClaude } from "@/lib/api";
 import { CATS, CAT_TAG, SEED_GROUPS, SEED_MESSAGES, MOCK_USERS, AI_TOOLS } from "@/lib/data";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STORAGE HELPERS  (swap .set/.get calls for Supabase client in production)
@@ -31,52 +34,60 @@ function AuthProvider({ children }) {
   const [sessionLoading, setSessionLoading] = useState(true);
 
   useEffect(() => {
-    try {
-      const token = sessionStorage.getItem("ec_token");
-      const uid   = sessionStorage.getItem("ec_uid");
-      if (token && uid) {
-        const verified = verifySessionToken(token);
-        if (verified) {
-          const found = MOCK_USERS.find(u => u.id === uid);
-          if (found) setUser({ ...found, password: undefined });
-        }
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (session?.user) {
+        const { data: profile } = await supabase
+          .from("users")
+          .select("*")
+          .eq("id", session.user.id)
+          .single();
+        if (profile) setUser({ ...profile, password: undefined });
       }
-    } catch {}
-    setSessionLoading(false);
+      setSessionLoading(false);
+    });
   }, []);
 
-  function login(email, password) {
+  async function login(email, password) {
     if (!ClientRateLimit.check("auth")) return { ok: false, error: "Too many attempts. Wait 1 minute." };
-    const found = MOCK_USERS.find(u => u.email === email.toLowerCase().trim() && u.password === password);
-    if (!found) return { ok: false, error: "Invalid email or password." };
-    const token = generateSessionToken(found.id);
-    sessionStorage.setItem("ec_token", token);
-    sessionStorage.setItem("ec_uid", found.id);
-    setUser({ ...found, password: undefined });
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.toLowerCase().trim(),
+      password,
+    });
+    if (error) return { ok: false, error: error.message };
+    const { data: profile } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", data.user.id)
+      .single();
+    setUser({ ...profile, password: undefined });
     return { ok: true };
   }
 
-  function register(name, email, password) {
+  async function register(name, email, password) {
     if (!ClientRateLimit.check("auth")) return { ok: false, error: "Too many attempts. Wait 1 minute." };
-    if (MOCK_USERS.find(u => u.email === email.toLowerCase().trim()))
-      return { ok: false, error: "An account with this email already exists." };
-    const newUser = {
-      id: "u" + Date.now(), email: email.toLowerCase().trim(), password,
-      name: sanitize(name, 60), role: "member",
+    const { data, error } = await supabase.auth.signUp({
+      email: email.toLowerCase().trim(),
+      password,
+    });
+    if (error) return { ok: false, error: error.message };
+    const profile = {
+      id: data.user.id,
+      email: email.toLowerCase().trim(),
+      name: sanitize(name, 60),
+      role: "member",
       avatar: name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase(),
-      bio: "", joinedGroups: [],
+      bio: "",
+      joined_groups: [],
     };
-    MOCK_USERS.push(newUser);
-    const token = generateSessionToken(newUser.id);
-    sessionStorage.setItem("ec_token", token);
-    sessionStorage.setItem("ec_uid", newUser.id);
-    setUser({ ...newUser, password: undefined });
+    const { error: insertError } = await supabase.from("users").insert([profile]);
+    if (insertError) return { ok: false, error: insertError.message };
+    setUser(profile);
     return { ok: true };
   }
 
   function logout() {
-    sessionStorage.removeItem("ec_token");
-    sessionStorage.removeItem("ec_uid");
+    supabase.auth.signOut();
+    sessionStorage.clear();
     setUser(null);
   }
 
@@ -180,8 +191,8 @@ function AuthScreen() {
     setLoading(true); setApiErr("");
     await new Promise(r => setTimeout(r, 300));
     const res = mode === "login"
-      ? login(f.email, f.password)
-      : register(f.name, f.email, f.password);
+      ? await login(f.email, f.password)
+      : await register(f.name, f.email, f.password);
     setLoading(false);
     if (!res.ok) { setApiErr(res.error); return; }
     toast(mode === "login" ? "Welcome back!" : "Account created!", "success");
@@ -942,7 +953,6 @@ function ToolsPage() {
         <p style={{ marginTop:".8rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:"1rem", maxWidth:580 }}>Recommended tools to wire a production backend into ExtraCrew.</p>
       </div>
 
-      {/* Architecture */}
       <div style={{ border:"2px solid var(--ink)", padding:"1rem 1.4rem", marginBottom:"1.5rem", background:"var(--paper2)", boxShadow:"4px 4px 0 var(--ink)", display:"flex", gap:0, overflowX:"auto", alignItems:"center" }}>
         {[{l:"Browser",s:"React",c:"var(--orange)"},{l:"→",s:"",c:"var(--muted2)"},{l:"/api/claude",s:"Vercel fn",c:"var(--blue)"},{l:"→",s:"",c:"var(--muted2)"},{l:"Anthropic",s:"API Key hidden",c:"var(--ink)"}].map((n,i)=>(
           <div key={i} style={{ display:"flex", flexDirection:"column", alignItems:"center", padding:".4rem .8rem", minWidth:n.l==="→"?28:100 }}>
@@ -952,7 +962,6 @@ function ToolsPage() {
         ))}
       </div>
 
-      {/* Security status */}
       <div style={{ border:"2px solid var(--green)", padding:"1rem 1.4rem", marginBottom:"2rem", background:"var(--green-lt)", display:"flex", gap:"1.5rem", flexWrap:"wrap", alignItems:"center" }}>
         <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em", color:"var(--green)" }}>SECURITY ACTIVE</div>
         {["API Key Hidden","Rate Limiting","Input Sanitization","XSS Prevention","CSP Headers","Session Auth","Content Policy"].map(s=>(
