@@ -24,7 +24,7 @@ const nextConfig = {
               "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // Next.js requires these
               "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
               "font-src 'self' https://fonts.gstatic.com",
-              "connect-src 'self'", // All API calls go through /api/* — never direct to Anthropic
+              "connect-src 'self' https://cadhchbfvguyzdjjzqzl.supabase.co https://*.supabase.co wss://*.supabase.co", // All API calls go through /api/* — never direct to Anthropic
               "img-src 'self' data:",
               "frame-ancestors 'none'",
             ].join("; "),

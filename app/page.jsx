@@ -47,7 +47,7 @@ function AuthProvider({ children }) {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
+      async (event, session) => {
         if (session?.user) {
           const { data: profile } = await supabase
             .from("users")
