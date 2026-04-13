@@ -95,6 +95,8 @@ function AuthProvider({ children }) {
       avatar: name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase(),
       bio: "",
       joined_groups: [],
+      activities: [],
+      awards: [],
     };
     const { error: insertError } = await supabase.from("users").insert([profile]);
     if (insertError) return { ok: false, error: insertError.message };
@@ -108,8 +110,12 @@ function AuthProvider({ children }) {
     setUser(null);
   }
 
+  function updateProfile(updates) {
+    setUser(u => ({ ...u, ...updates }));
+  }
+
   return (
-    <AuthCtx.Provider value={{ user, login, logout, register, sessionLoading }}>
+    <AuthCtx.Provider value={{ user, login, logout, register, sessionLoading, updateProfile }}>
       {children}
     </AuthCtx.Provider>
   );
@@ -153,6 +159,16 @@ function avatarColor(n) { let h = 0; for (const c of (n||"?")) h = (h*31+c.charC
 function initials(n) { return (n||"?") === "You" ? "ME" : n.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase(); }
 function ago(ts) { const d = Math.floor((Date.now()-ts)/864e5); return d===0?"today":d===1?"yesterday":`${d}d ago`; }
 function ftime(ts) { return new Date(ts).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}); }
+
+const ACTIVITY_TYPES = [
+  "Academic","Art","Athletics: Club","Athletics: JV/Varsity","Career-Oriented",
+  "Community Service (Volunteer)","Computer/Technology","Cultural","Dance","Debate/Speech",
+  "Environmental","Family Responsibilities","Foreign Exchange","Journalism/Publication",
+  "Junior R.O.T.C.","LGBT","Music: Instrumental","Music: Vocal","Religious","Research",
+  "Robotics","School Spirit","Science/Math","Social Justice","Student Govt./Politics",
+  "Theater/Drama","Work (paid)","Other Club/Activity",
+];
+const GRADE_OPTIONS = ["9","10","11","12","Post-graduate"];
 
 function Spinner({ size = 18 }) {
   return <div className="spinner" style={{ width: size, height: size }} />;
@@ -284,6 +300,61 @@ function AuthScreen() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PROFILE MODAL (public view)
+// ═══════════════════════════════════════════════════════════════════════════
+function ProfileModal({ u, onClose }) {
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth:500 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"1.2rem" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:".9rem" }}>
+            <Avatar name={u.name} size={48}/>
+            <div>
+              <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".03em" }}>{u.name}</div>
+              {u.bio && <p style={{ fontSize:".78rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", lineHeight:1.5, marginTop:".2rem", maxWidth:300 }}>{u.bio}</p>}
+            </div>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
+        </div>
+        {u.activities?.length > 0 && (
+          <>
+            <div style={{ fontFamily:"var(--font-display)", fontSize:".85rem", letterSpacing:".04em", marginBottom:".55rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".4rem" }}>ACTIVITIES</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:".4rem", marginBottom:"1rem" }}>
+              {u.activities.map((a, i) => (
+                <div key={i} style={{ padding:".5rem .7rem", background:"var(--paper2)", border:"1px solid var(--paper3)", fontSize:".8rem" }}>
+                  <div style={{ fontWeight:700 }}>{a.position}{a.org_name ? ` — ${a.org_name}` : ""}</div>
+                  {a.description && <div style={{ color:"var(--muted)", fontSize:".75rem", fontStyle:"italic", marginTop:".1rem" }}>{a.description}</div>}
+                  <div style={{ color:"var(--muted2)", fontSize:".68rem", marginTop:".2rem" }}>{a.activity_type}{a.grades?.length ? ` · Gr. ${a.grades.join(", ")}` : ""}</div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+        {u.awards?.length > 0 && (
+          <>
+            <div style={{ fontFamily:"var(--font-display)", fontSize:".85rem", letterSpacing:".04em", marginBottom:".55rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".4rem" }}>HONORS & AWARDS</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:".4rem" }}>
+              {u.awards.map((a, i) => (
+                <div key={i} style={{ padding:".5rem .7rem", background:"var(--paper2)", border:"1px solid var(--paper3)", fontSize:".8rem" }}>
+                  <div style={{ fontWeight:700 }}>{a.title}</div>
+                  <div style={{ color:"var(--muted)", fontSize:".75rem", marginTop:".1rem" }}>
+                    {Array.isArray(a.recognition) ? a.recognition.join(", ") : a.recognition}
+                    {a.grades?.length ? ` · Gr. ${a.grades.join(", ")}` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+        {!u.activities?.length && !u.awards?.length && (
+          <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".85rem" }}>No activities or awards added yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // LOBBY
 // ═══════════════════════════════════════════════════════════════════════════
 const CAT_BG      = { blue:"var(--blue-lt)",   red:"var(--red-lt)",   green:"var(--green-lt)",   orange:"var(--orange-lt)"   };
@@ -291,38 +362,55 @@ const CAT_ACCENT  = { blue:"var(--blue)",      red:"var(--red)",      green:"var
 const CAT_SHADOW  = { blue:"#1a3a6b55",        red:"#c0392b55",       green:"#1a6b3c55",         orange:"#e8500a55"          };
 
 function GroupCard({ g, onJoin, userId }) {
+  const { user: currentUser } = useAuth();
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileUser, setProfileUser] = useState(null);
   const cat   = CATS.find(c => c.id === g.category);
   const isIn  = g.members.includes(userId);
   const full  = g.members.length >= g.max;
   const cardBg     = CAT_BG[cat?.color]     || "var(--chalk)";
   const cardAccent = CAT_ACCENT[cat?.color] || "var(--ink)";
   const cardShadow = CAT_SHADOW[cat?.color] || "rgba(15,14,13,.35)";
+
+  async function openCreator() {
+    if (g.byId === currentUser?.id) {
+      setProfileUser(currentUser);
+    } else {
+      const { data } = await supabase.from("users").select("name, bio, activities, awards").eq("id", g.byId).single();
+      if (data) setProfileUser(data);
+    }
+    setProfileOpen(true);
+  }
+
   return (
-    <div className="card" style={{ display:"flex", flexDirection:"column", gap:".9rem", background: cardBg, borderColor: cardAccent, boxShadow: `4px 4px 0 ${cardShadow}` }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:".5rem" }}>
-        <div>
-          <div style={{ fontSize:".63rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".3rem" }}>{cat?.icon} {g.sub}</div>
-          <div style={{ fontFamily:"var(--font-body)", fontWeight:700, fontSize:"1rem", lineHeight:1.25 }}>{g.name}</div>
-        </div>
-        <span className={`tag ${CAT_TAG[cat?.color]||""}`} style={{ flexShrink:0 }}>{g.remote ? "Remote" : g.location.split(",")[0]}</span>
-      </div>
-      <p style={{ fontSize:".83rem", color:"var(--muted)", lineHeight:1.6, fontStyle:"italic", fontFamily:"var(--font-serif)" }}>{g.desc}</p>
-      <div style={{ display:"flex", flexWrap:"wrap", gap:".3rem" }}>
-        {g.tags.map(t => <span key={t} className="tag" style={{ fontSize:".6rem" }}>{t}</span>)}
-      </div>
-      <div style={{ borderTop:"1.5px solid var(--paper3)", paddingTop:".85rem" }}>
-        <MemberBar count={g.members.length} max={g.max}/>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:".7rem" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:".4rem" }}>
-            <span style={{ fontSize:".65rem", color:"var(--muted2)", textTransform:"uppercase", letterSpacing:".05em", fontWeight:600 }}>{ago(g.ts)}</span>
-            <span style={{ fontSize:".6rem", color:"var(--muted2)" }}>· {g.byName}</span>
+    <>
+      <div className="card" style={{ display:"flex", flexDirection:"column", gap:".9rem", background: cardBg, borderColor: cardAccent, boxShadow: `4px 4px 0 ${cardShadow}` }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:".5rem" }}>
+          <div>
+            <div style={{ fontSize:".63rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".3rem" }}>{cat?.icon} {g.sub}</div>
+            <div style={{ fontFamily:"var(--font-body)", fontWeight:700, fontSize:"1rem", lineHeight:1.25 }}>{g.name}</div>
           </div>
-          {isIn  ? <span className="tag tag-green">✓ Joined</span>
-          : full  ? <span style={{ fontSize:".72rem", color:"var(--muted)", fontWeight:600, textTransform:"uppercase", letterSpacing:".05em" }}>Full</span>
-          : <button className="btn btn-sm" onClick={() => onJoin(g.id)}>Join →</button>}
+          <span className={`tag ${CAT_TAG[cat?.color]||""}`} style={{ flexShrink:0 }}>{g.remote ? "Remote" : g.location.split(",")[0]}</span>
+        </div>
+        <p style={{ fontSize:".83rem", color:"var(--muted)", lineHeight:1.6, fontStyle:"italic", fontFamily:"var(--font-serif)" }}>{g.desc}</p>
+        <div style={{ display:"flex", flexWrap:"wrap", gap:".3rem" }}>
+          {g.tags.map(t => <span key={t} className="tag" style={{ fontSize:".6rem" }}>{t}</span>)}
+        </div>
+        <div style={{ borderTop:"1.5px solid var(--paper3)", paddingTop:".85rem" }}>
+          <MemberBar count={g.members.length} max={g.max}/>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:".7rem" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:".4rem" }}>
+              <span style={{ fontSize:".65rem", color:"var(--muted2)", textTransform:"uppercase", letterSpacing:".05em", fontWeight:600 }}>{ago(g.ts)}</span>
+              <button onClick={openCreator} style={{ background:"none", border:"none", padding:0, cursor:"pointer", fontSize:".6rem", color:"var(--muted2)", fontFamily:"var(--font-body)", textDecoration:"underline dotted" }}>· {g.byName}</button>
+            </div>
+            {isIn  ? <span className="tag tag-green">✓ Joined</span>
+            : full  ? <span style={{ fontSize:".72rem", color:"var(--muted)", fontWeight:600, textTransform:"uppercase", letterSpacing:".05em" }}>Full</span>
+            : <button className="btn btn-sm" onClick={() => onJoin(g.id)}>Join →</button>}
+          </div>
         </div>
       </div>
-    </div>
+      {profileOpen && profileUser && <ProfileModal u={profileUser} onClose={() => { setProfileOpen(false); setProfileUser(null); }}/>}
+    </>
   );
 }
 
@@ -480,6 +568,7 @@ function LobbyPage({ groups, setGroups }) {
 // ═══════════════════════════════════════════════════════════════════════════
 function AdvisorPage({ goLobby }) {
   const toast = useToast();
+  const { user } = useAuth();
   const [f, setF]           = useState({ gpa:"", sat:"", act:"", major:"", interests:"", activities:"" });
   const [loading, setLoading] = useState(false);
   const [res, setRes]       = useState(null);
@@ -494,11 +583,19 @@ function AdvisorPage({ goLobby }) {
     if (remaining <= 0) { toast("AI request limit reached. Try again in a minute.", "error"); return; }
     setLoading(true); setRes(null);
     try {
+      const profileActs = user?.activities?.length
+        ? user.activities.map(a => `${a.position} at ${a.org_name} (${a.activity_type})`).join("; ")
+        : null;
+      const profileAwds = user?.awards?.length
+        ? user.awards.map(a => a.title).join("; ")
+        : null;
+      const activitiesStr = profileActs || sanitize(f.activities) || "None";
+      const awardsLine = profileAwds ? ` Awards:${profileAwds}` : "";
       const sys = `You are an expert college admissions counselor. Return ONLY valid JSON (no markdown, no backticks) with this exact shape:
 {"summary":"string","schools":[{"name":"","tier":"Reach|Match|Safety","reason":""}],"strengths":[""],"gaps":[""],"activities":[{"name":"","why":"","category":"stem|premed|biz|arts|social|law|env|sports"}]}
 Rules: 5-7 schools, 4-6 activities, be specific and realistic.`;
       const raw  = await callClaude(sys,
-        `GPA:${sanitize(f.gpa)||"N/A"} SAT:${sanitize(f.sat)||"N/A"} ACT:${sanitize(f.act)||"N/A"} Major:${sanitize(f.major)} Interests:${sanitize(f.interests)||"N/A"} Activities:${sanitize(f.activities)||"None"}`,
+        `GPA:${sanitize(f.gpa)||"N/A"} SAT:${sanitize(f.sat)||"N/A"} ACT:${sanitize(f.act)||"N/A"} Major:${sanitize(f.major)} Interests:${sanitize(f.interests)||"N/A"} Activities:${activitiesStr}${awardsLine}`,
         [], { maxTokens: 1200 }
       );
       const parsed = JSON.parse(raw.replace(/```json|```/g,"").trim());
@@ -542,9 +639,16 @@ Rules:
 - Return exactly 10 activities and up to 5 awards
 - STRICTLY enforce character limits
 - Pick activity_type from the exact list provided`;
+      const profileActs = user?.activities?.length
+        ? user.activities.map(a => `${a.position} at ${a.org_name} (${a.activity_type}): ${a.description}`).join("\n")
+        : null;
+      const profileAwds = user?.awards?.length
+        ? user.awards.map(a => `${a.title} (${Array.isArray(a.recognition) ? a.recognition.join("/") : a.recognition})`).join(", ")
+        : null;
+      const activitiesContext = profileActs || f.activities || "None";
       const prompt = `Student major: ${f.major}
 Interests: ${f.interests}
-Current activities: ${f.activities}
+Current activities: ${activitiesContext}${profileAwds ? `\nHonors/Awards: ${profileAwds}` : ""}
 GPA: ${f.gpa}, SAT: ${f.sat}, ACT: ${f.act}
 Advisor recommended activities: ${res.activities.map(a => `${a.name}: ${a.why}`).join(', ')}`;
       const raw = await callClaude(sys, prompt, [], { maxTokens: 2000 });
@@ -581,7 +685,13 @@ Advisor recommended activities: ${res.activities.map(a => `${a.name}: ${a.why}`)
               <div><label>Intended Major *</label><input value={f.major} onChange={e=>set("major",e.target.value)} placeholder="Mech. Engineering" maxLength={80}/></div>
             </div>
             <div><label>Interests & Hobbies</label><input value={f.interests}  onChange={e=>set("interests",e.target.value)}  placeholder="robotics, writing…" maxLength={200}/></div>
-            <div><label>Current Activities</label> <textarea rows={2} value={f.activities} onChange={e=>set("activities",e.target.value)} placeholder="school band, JV soccer…" maxLength={400}/></div>
+            <div>
+                <label>
+                  Current Activities
+                  {user?.activities?.length > 0 && <span style={{ color:"var(--green)", fontSize:".6rem", fontWeight:700, marginLeft:".5rem" }}>✓ {user.activities.length} from profile</span>}
+                </label>
+                <textarea rows={2} value={f.activities} onChange={e=>set("activities",e.target.value)} placeholder={user?.activities?.length > 0 ? "Profile activities used — type here to override…" : "school band, JV soccer…"} maxLength={400}/>
+              </div>
             <button className="btn btn-orange" onClick={analyze} disabled={loading||!f.major} style={{ marginTop:".4rem", width:"100%", justifyContent:"center" }}>
               {loading ? <><Spinner size={14}/>Analyzing…</> : "Analyze My Profile →"}
             </button>
@@ -1038,26 +1148,59 @@ function AIChatPage() {
 // PROFILE
 // ═══════════════════════════════════════════════════════════════════════════
 function ProfilePage() {
-  const { user, logout } = useAuth();
+  const { user, logout, updateProfile } = useAuth();
   const toast = useToast();
-  const [editing, setEditing] = useState(false);
-  const [bio, setBio]         = useState(user?.bio || "");
+  const [bioEdit, setBioEdit]       = useState(false);
+  const [bio, setBio]               = useState(user?.bio || "");
+  const [activities, setActivities] = useState(user?.activities || []);
+  const [awards, setAwards]         = useState(user?.awards || []);
+  const [saving, setSaving]         = useState(false);
+
+  const blankActivity = () => ({
+    activity_type: "Other Club/Activity", position: "", org_name: "", description: "",
+    grades: [], timing: "During school year", hours_per_week: 0, weeks_per_year: 0,
+  });
+  const blankAward = () => ({ title: "", grades: [], recognition: [] });
 
   function saveBio() {
     const clean = sanitize(bio, 300);
     if (!Validators.maxLen(clean, 300)) { toast("Bio too long (max 300 chars).", "warning"); return; }
-    user.bio = clean;
-    setEditing(false);
-    toast("Profile updated!", "success");
+    updateProfile({ bio: clean });
+    setBioEdit(false);
+    toast("Bio updated!", "success");
+  }
+
+  async function saveActivitiesAwards() {
+    setSaving(true);
+    const cleanActs = activities.map(a => ({
+      ...a, position: sanitize(a.position, 50), org_name: sanitize(a.org_name, 100), description: sanitize(a.description, 150),
+    }));
+    const { error } = await supabase.from("users").update({ activities: cleanActs, awards }).eq("id", user.id);
+    if (error) toast("Save failed. Try again.", "error");
+    else { updateProfile({ activities: cleanActs, awards }); toast("Saved!", "success"); }
+    setSaving(false);
+  }
+
+  function setAct(i, key, val) { setActivities(prev => prev.map((a, idx) => idx === i ? {...a, [key]: val} : a)); }
+  function toggleActGrade(i, g) { setAct(i, "grades", activities[i].grades.includes(g) ? activities[i].grades.filter(x => x !== g) : [...activities[i].grades, g]); }
+  function setAwd(i, key, val) { setAwards(prev => prev.map((a, idx) => idx === i ? {...a, [key]: val} : a)); }
+  function toggleAwdGrade(i, g) { setAwd(i, "grades", awards[i].grades.includes(g) ? awards[i].grades.filter(x => x !== g) : [...awards[i].grades, g]); }
+  function toggleAwdRec(i, r) { const cur = awards[i].recognition || []; setAwd(i, "recognition", cur.includes(r) ? cur.filter(x => x !== r) : [...cur, r]); }
+
+  function cc(text, max) {
+    const len = (text || "").length;
+    return <span style={{ color: len > max ? "var(--red)" : "var(--muted)", fontSize:".63rem", fontWeight:600, marginLeft:".3rem" }}>{len}/{max}</span>;
   }
 
   return (
-    <div style={{ padding:"2rem 0", maxWidth:560, margin:"0 auto" }}>
+    <div style={{ padding:"2rem 0", maxWidth:700, margin:"0 auto" }}>
       <div style={{ borderBottom:"2px solid var(--ink)", paddingBottom:"1.5rem", marginBottom:"2rem" }}>
         <div style={{ fontFamily:"var(--font-display)", fontSize:"clamp(3rem,8vw,5.5rem)", lineHeight:.9, letterSpacing:".02em" }}>YOUR<br/><span style={{ WebkitTextStroke:"2px var(--ink)", color:"transparent" }}>PROFILE</span></div>
       </div>
-      <div className="card" style={{ display:"flex", flexDirection:"column", gap:"1.2rem" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:"1.2rem" }}>
+
+      {/* Identity */}
+      <div className="card" style={{ marginBottom:"1.2rem" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:"1.2rem", marginBottom:"1.2rem" }}>
           <div style={{ width:60, height:60, border:"3px solid var(--orange)", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"var(--font-display)", fontSize:"1.4rem", background:"var(--orange-lt)", color:"var(--orange)" }}>{user?.avatar}</div>
           <div>
             <div style={{ fontWeight:700, fontSize:"1.1rem" }}>{user?.name}</div>
@@ -1067,29 +1210,151 @@ function ProfilePage() {
         </div>
         <div style={{ borderTop:"1.5px solid var(--paper3)", paddingTop:"1rem" }}>
           <label>Bio</label>
-          {editing ? (
+          {bioEdit ? (
             <>
               <textarea rows={3} value={bio} onChange={e=>setBio(e.target.value)} maxLength={300}/>
               <div style={{ display:"flex", gap:".5rem", marginTop:".6rem" }}>
                 <button className="btn btn-orange btn-sm" onClick={saveBio}>Save</button>
-                <button className="btn btn-ghost btn-sm" onClick={()=>setEditing(false)}>Cancel</button>
+                <button className="btn btn-ghost btn-sm" onClick={()=>setBioEdit(false)}>Cancel</button>
               </div>
             </>
           ) : (
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"1rem" }}>
               <p style={{ fontSize:".85rem", fontStyle:"italic", fontFamily:"var(--font-serif)", color:"var(--muted)", lineHeight:1.6 }}>{user?.bio || "No bio yet."}</p>
-              <button className="btn btn-ghost btn-sm" onClick={()=>setEditing(true)} style={{ flexShrink:0 }}>Edit</button>
+              <button className="btn btn-ghost btn-sm" onClick={()=>setBioEdit(true)} style={{ flexShrink:0 }}>Edit</button>
             </div>
           )}
         </div>
-        <div style={{ borderTop:"1.5px solid var(--paper3)", paddingTop:"1rem" }}>
-          <div style={{ fontSize:".68rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".6rem" }}>Security Status</div>
-          <div style={{ fontSize:".78rem", color:"var(--muted)", lineHeight:1.8 }}>
-            <div>✓ Session token active (expires in 24h)</div>
-            <div>✓ All inputs sanitized before use</div>
-            <div>✓ API key never sent to browser</div>
-            <div>✓ Rate limiting enforced — {ClientRateLimit.remaining("claude")} AI calls left this minute</div>
+      </div>
+
+      {/* Activities */}
+      <div className="card" style={{ marginBottom:"1.2rem" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em" }}>
+            ACTIVITIES <span style={{ fontSize:".65rem", color:"var(--muted)", fontWeight:400, fontFamily:"var(--font-body)", letterSpacing:0 }}>{activities.length}/10</span>
           </div>
+          {activities.length < 10 && <button className="btn btn-sm" onClick={() => setActivities(p => [...p, blankActivity()])}>+ Add Activity</button>}
+        </div>
+        {activities.length === 0 && <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".85rem" }}>No activities yet. Add up to 10.</p>}
+        <div style={{ display:"flex", flexDirection:"column", gap:"1rem" }}>
+          {activities.map((a, i) => (
+            <div key={i} style={{ border:"1px solid var(--paper3)", padding:"1rem", background:"var(--paper2)" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:".75rem" }}>
+                <div style={{ fontSize:".68rem", fontWeight:700, letterSpacing:".07em", textTransform:"uppercase", color:"var(--muted)" }}>Activity {i+1}</div>
+                <button onClick={() => setActivities(p => p.filter((_,idx) => idx !== i))} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--red)", fontWeight:700, fontSize:".75rem", padding:".15rem .5rem", fontFamily:"var(--font-body)" }}>Delete</button>
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".6rem" }}>
+                <div style={{ gridColumn:"1/-1" }}>
+                  <label style={{ fontSize:".65rem" }}>Activity Type</label>
+                  <select value={a.activity_type} onChange={e => setAct(i, "activity_type", e.target.value)}>
+                    {ACTIVITY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize:".65rem" }}>Position/Leadership {cc(a.position, 50)}</label>
+                  <input value={a.position} onChange={e => setAct(i, "position", e.target.value)} maxLength={50} placeholder="e.g. President"/>
+                </div>
+                <div>
+                  <label style={{ fontSize:".65rem" }}>Organization Name {cc(a.org_name, 100)}</label>
+                  <input value={a.org_name} onChange={e => setAct(i, "org_name", e.target.value)} maxLength={100} placeholder="e.g. Math Club"/>
+                </div>
+                <div style={{ gridColumn:"1/-1" }}>
+                  <label style={{ fontSize:".65rem" }}>Description {cc(a.description, 150)}</label>
+                  <textarea rows={2} value={a.description} onChange={e => setAct(i, "description", e.target.value)} maxLength={160} placeholder="Strong action verbs, quantify impact…"/>
+                </div>
+                <div style={{ gridColumn:"1/-1" }}>
+                  <label style={{ fontSize:".65rem" }}>Grades Participated</label>
+                  <div style={{ display:"flex", gap:".7rem", flexWrap:"wrap", marginTop:".35rem" }}>
+                    {GRADE_OPTIONS.map(g => (
+                      <label key={g} style={{ display:"flex", alignItems:"center", gap:".3rem", fontSize:".8rem", fontWeight:400, textTransform:"none", letterSpacing:0, cursor:"pointer", margin:0 }}>
+                        <input type="checkbox" checked={a.grades.includes(g)} onChange={() => toggleActGrade(i, g)} style={{ width:"auto", accentColor:"var(--orange)", cursor:"pointer" }}/>{g}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize:".65rem" }}>Timing</label>
+                  <select value={a.timing} onChange={e => setAct(i, "timing", e.target.value)}>
+                    <option>During school year</option>
+                    <option>During school break</option>
+                    <option>All year</option>
+                  </select>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".5rem" }}>
+                  <div>
+                    <label style={{ fontSize:".65rem" }}>Hrs/week</label>
+                    <input type="number" value={a.hours_per_week} onChange={e => setAct(i, "hours_per_week", Number(e.target.value))} min={0} max={168}/>
+                  </div>
+                  <div>
+                    <label style={{ fontSize:".65rem" }}>Wks/year</label>
+                    <input type="number" value={a.weeks_per_year} onChange={e => setAct(i, "weeks_per_year", Number(e.target.value))} min={0} max={52}/>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Awards */}
+      <div className="card" style={{ marginBottom:"1.2rem" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em" }}>
+            HONORS & AWARDS <span style={{ fontSize:".65rem", color:"var(--muted)", fontWeight:400, fontFamily:"var(--font-body)", letterSpacing:0 }}>{awards.length}/5</span>
+          </div>
+          {awards.length < 5 && <button className="btn btn-sm" onClick={() => setAwards(p => [...p, blankAward()])}>+ Add Award</button>}
+        </div>
+        {awards.length === 0 && <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".85rem" }}>No awards yet. Add up to 5.</p>}
+        <div style={{ display:"flex", flexDirection:"column", gap:"1rem" }}>
+          {awards.map((a, i) => (
+            <div key={i} style={{ border:"1px solid var(--paper3)", padding:"1rem", background:"var(--paper2)" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:".75rem" }}>
+                <div style={{ fontSize:".68rem", fontWeight:700, letterSpacing:".07em", textTransform:"uppercase", color:"var(--muted)" }}>Award {i+1}</div>
+                <button onClick={() => setAwards(p => p.filter((_,idx) => idx !== i))} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--red)", fontWeight:700, fontSize:".75rem", padding:".15rem .5rem", fontFamily:"var(--font-body)" }}>Delete</button>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:".6rem" }}>
+                <div>
+                  <label style={{ fontSize:".65rem" }}>Award/Honor Title {cc(a.title, 100)}</label>
+                  <input value={a.title} onChange={e => setAwd(i, "title", e.target.value)} maxLength={100} placeholder="e.g. National Merit Scholar"/>
+                </div>
+                <div>
+                  <label style={{ fontSize:".65rem" }}>Grades</label>
+                  <div style={{ display:"flex", gap:".7rem", flexWrap:"wrap", marginTop:".35rem" }}>
+                    {GRADE_OPTIONS.map(g => (
+                      <label key={g} style={{ display:"flex", alignItems:"center", gap:".3rem", fontSize:".8rem", fontWeight:400, textTransform:"none", letterSpacing:0, cursor:"pointer", margin:0 }}>
+                        <input type="checkbox" checked={a.grades.includes(g)} onChange={() => toggleAwdGrade(i, g)} style={{ width:"auto", accentColor:"var(--orange)", cursor:"pointer" }}/>{g}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize:".65rem" }}>Recognition Level</label>
+                  <div style={{ display:"flex", gap:".7rem", flexWrap:"wrap", marginTop:".35rem" }}>
+                    {["School","State/Regional","National","International"].map(r => (
+                      <label key={r} style={{ display:"flex", alignItems:"center", gap:".3rem", fontSize:".8rem", fontWeight:400, textTransform:"none", letterSpacing:0, cursor:"pointer", margin:0 }}>
+                        <input type="checkbox" checked={(a.recognition||[]).includes(r)} onChange={() => toggleAwdRec(i, r)} style={{ width:"auto", accentColor:"var(--orange)", cursor:"pointer" }}/>{r}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <button className="btn btn-orange" onClick={saveActivitiesAwards} disabled={saving} style={{ width:"100%", justifyContent:"center", marginBottom:"1.4rem" }}>
+        {saving ? <><Spinner size={14}/>Saving…</> : "Save Activities & Awards →"}
+      </button>
+
+      {/* Security */}
+      <div className="card">
+        <div style={{ fontSize:".68rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".6rem" }}>Security Status</div>
+        <div style={{ fontSize:".78rem", color:"var(--muted)", lineHeight:1.8, marginBottom:"1rem" }}>
+          <div>✓ Session token active (expires in 24h)</div>
+          <div>✓ All inputs sanitized before use</div>
+          <div>✓ API key never sent to browser</div>
+          <div>✓ Rate limiting enforced — {ClientRateLimit.remaining("claude")} AI calls left this minute</div>
         </div>
         <button className="btn btn-ghost" onClick={logout} style={{ alignSelf:"flex-start" }}>Sign Out →</button>
       </div>
