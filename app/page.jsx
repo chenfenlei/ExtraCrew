@@ -97,6 +97,10 @@ function AuthProvider({ children }) {
       joined_groups: [],
       activities: [],
       awards: [],
+      gpa: "",
+      sat: "",
+      act: "",
+      intended_major: "",
     };
     const { error: insertError } = await supabase.from("users").insert([profile]);
     if (insertError) return { ok: false, error: insertError.message };
@@ -566,7 +570,7 @@ function LobbyPage({ groups, setGroups }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // ADVISOR
 // ═══════════════════════════════════════════════════════════════════════════
-function AdvisorPage({ goLobby }) {
+function AdvisorPage({ goLobby, goProfile }) {
   const toast = useToast();
   const { user } = useAuth();
   const [f, setF]           = useState({ gpa:"", sat:"", act:"", major:"", interests:"", activities:"" });
@@ -576,6 +580,10 @@ function AdvisorPage({ goLobby }) {
   const [caRes, setCaRes]   = useState(null);
   const set = (k, v) => setF(p => ({...p,[k]:v}));
   const remaining = ClientRateLimit.remaining("claude");
+
+  useEffect(() => {
+    if (user) setF(p => ({ ...p, gpa: user.gpa||"", sat: user.sat||"", act: user.act||"", major: user.intended_major||"" }));
+  }, []); // pre-fill once on mount
 
   async function analyze() {
     if (!f.major) { toast("Please enter your intended major.", "warning"); return; }
@@ -699,6 +707,28 @@ Advisor recommended activities: ${res.activities.map(a => `${a.name}: ${a.why}`)
         </div>
 
         <div style={{ display:"flex", flexDirection:"column", gap:"1.1rem" }}>
+          <div className="card fade-up">
+            <div style={{ fontFamily:"var(--font-display)", fontSize:"1.2rem", letterSpacing:".04em", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>YOUR HONORS & AWARDS</div>
+            {user?.awards?.length > 0 ? (
+              <div style={{ display:"flex", flexDirection:"column", gap:".4rem" }}>
+                {user.awards.map((a, i) => (
+                  <div key={i} style={{ padding:".55rem .75rem", background:"var(--paper2)", border:"1px solid var(--paper3)", fontSize:".82rem" }}>
+                    <div style={{ fontWeight:700 }}>{a.title}</div>
+                    <div style={{ color:"var(--muted)", fontSize:".73rem", marginTop:".15rem" }}>
+                      {Array.isArray(a.recognition) ? a.recognition.join(", ") : a.recognition}
+                      {a.grades?.length ? ` · Gr. ${a.grades.join(", ")}` : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:"1rem" }}>
+                <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".85rem", margin:0 }}>No awards yet — add them in your Profile.</p>
+                {goProfile && <button className="btn btn-ghost btn-sm" onClick={goProfile} style={{ flexShrink:0 }}>Edit in Profile →</button>}
+              </div>
+            )}
+          </div>
+
           {!res && !loading && (
             <div style={{ border:"2px dashed var(--muted2)", padding:"4rem", textAlign:"center" }}>
               <div style={{ fontFamily:"var(--font-display)", fontSize:"2.2rem", color:"var(--muted2)", marginBottom:".5rem" }}>RESULTS HERE</div>
@@ -1152,9 +1182,11 @@ function ProfilePage() {
   const toast = useToast();
   const [bioEdit, setBioEdit]       = useState(false);
   const [bio, setBio]               = useState(user?.bio || "");
+  const [acad, setAcad]             = useState({ gpa: user?.gpa||"", sat: user?.sat||"", act: user?.act||"", intended_major: user?.intended_major||"" });
   const [activities, setActivities] = useState(user?.activities || []);
   const [awards, setAwards]         = useState(user?.awards || []);
   const [saving, setSaving]         = useState(false);
+  const sa = (k, v) => setAcad(p => ({...p, [k]: v}));
 
   const blankActivity = () => ({
     activity_type: "Other Club/Activity", position: "", org_name: "", description: "",
@@ -1170,14 +1202,22 @@ function ProfilePage() {
     toast("Bio updated!", "success");
   }
 
-  async function saveActivitiesAwards() {
+  async function saveProfile() {
     setSaving(true);
     const cleanActs = activities.map(a => ({
       ...a, position: sanitize(a.position, 50), org_name: sanitize(a.org_name, 100), description: sanitize(a.description, 150),
     }));
-    const { error } = await supabase.from("users").update({ activities: cleanActs, awards }).eq("id", user.id);
+    const updates = {
+      gpa: sanitize(acad.gpa, 10),
+      sat: sanitize(acad.sat, 10),
+      act: sanitize(acad.act, 6),
+      intended_major: sanitize(acad.intended_major, 80),
+      activities: cleanActs,
+      awards,
+    };
+    const { error } = await supabase.from("users").update(updates).eq("id", user.id);
     if (error) toast("Save failed. Try again.", "error");
-    else { updateProfile({ activities: cleanActs, awards }); toast("Saved!", "success"); }
+    else { updateProfile(updates); toast("Profile saved!", "success"); }
     setSaving(false);
   }
 
@@ -1224,6 +1264,29 @@ function ProfilePage() {
               <button className="btn btn-ghost btn-sm" onClick={()=>setBioEdit(true)} style={{ flexShrink:0 }}>Edit</button>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Academic Profile */}
+      <div className="card" style={{ marginBottom:"1.2rem" }}>
+        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>ACADEMIC PROFILE</div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".7rem" }}>
+          <div>
+            <label>GPA (Weighted)</label>
+            <input value={acad.gpa} onChange={e=>sa("gpa",e.target.value)} placeholder="4.2" maxLength={10}/>
+          </div>
+          <div>
+            <label>Intended Major</label>
+            <input value={acad.intended_major} onChange={e=>sa("intended_major",e.target.value)} placeholder="Mechanical Engineering" maxLength={80}/>
+          </div>
+          <div>
+            <label>SAT Score</label>
+            <input value={acad.sat} onChange={e=>sa("sat",e.target.value)} placeholder="1480" maxLength={10}/>
+          </div>
+          <div>
+            <label>ACT Score</label>
+            <input value={acad.act} onChange={e=>sa("act",e.target.value)} placeholder="32" maxLength={6}/>
+          </div>
         </div>
       </div>
 
@@ -1343,8 +1406,8 @@ function ProfilePage() {
         </div>
       </div>
 
-      <button className="btn btn-orange" onClick={saveActivitiesAwards} disabled={saving} style={{ width:"100%", justifyContent:"center", marginBottom:"1.4rem" }}>
-        {saving ? <><Spinner size={14}/>Saving…</> : "Save Activities & Awards →"}
+      <button className="btn btn-orange" onClick={saveProfile} disabled={saving} style={{ width:"100%", justifyContent:"center", marginBottom:"1.4rem" }}>
+        {saving ? <><Spinner size={14}/>Saving…</> : "Save Profile →"}
       </button>
 
       {/* Security */}
@@ -1485,7 +1548,7 @@ function AppShell() {
 
       <main style={{ flex:1, overflow:fullPage?"hidden":"auto" }}>
         {page==="lobby"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups}/></div>}
-        {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={()=>setPage("lobby")}/></div>}
+        {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={()=>setPage("lobby")} goProfile={()=>setPage("profile")}/></div>}
         {page==="mygroups" && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><MyGroupsPage groups={groups} setGroups={setGroups} goChat={goChat}/></div>}
         {page==="messages" && <ChatPage groups={groups} jumpGroup={jumpGroup}/>}
         {page==="aichat"   && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><AIChatPage/></div>}
