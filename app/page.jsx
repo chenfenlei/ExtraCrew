@@ -1186,6 +1186,7 @@ function ProfilePage() {
   const [activities, setActivities] = useState(user?.activities || []);
   const [awards, setAwards]         = useState(user?.awards || []);
   const [saving, setSaving]         = useState(false);
+  const [acadSaving, setAcadSaving] = useState(false);
   const sa = (k, v) => setAcad(p => ({...p, [k]: v}));
 
   const blankActivity = () => ({
@@ -1200,6 +1201,20 @@ function ProfilePage() {
     updateProfile({ bio: clean });
     setBioEdit(false);
     toast("Bio updated!", "success");
+  }
+
+  async function saveAcad() {
+    setAcadSaving(true);
+    const updates = {
+      gpa: sanitize(acad.gpa, 10),
+      sat: sanitize(acad.sat, 10),
+      act: sanitize(acad.act, 6),
+      intended_major: sanitize(acad.intended_major, 80),
+    };
+    const { error } = await supabase.from("users").update(updates).eq("id", user.id);
+    if (error) toast("Save failed. Try again.", "error");
+    else { updateProfile(updates); toast("Academic profile saved!", "success"); }
+    setAcadSaving(false);
   }
 
   async function saveProfile() {
@@ -1288,6 +1303,9 @@ function ProfilePage() {
             <input value={acad.act} onChange={e=>sa("act",e.target.value)} placeholder="32" maxLength={6}/>
           </div>
         </div>
+        <button className="btn btn-orange" onClick={saveAcad} disabled={acadSaving} style={{ marginTop:"1rem", width:"100%", justifyContent:"center" }}>
+          {acadSaving ? <><Spinner size={14}/>Saving…</> : "Save Academic Profile →"}
+        </button>
       </div>
 
       {/* Activities */}
