@@ -34,18 +34,14 @@ function AuthProvider({ children }) {
   const [sessionLoading, setSessionLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (session?.user) {
-        const { data: profile } = await supabase.from('users').select('*').eq('id', session.user.id).single();
+        const { data: profile } = await supabase.from("users").select("*").eq("id", session.user.id).single();
         if (profile) setUser({ ...profile, password: undefined });
+      } else {
+        setUser(null);
       }
       setSessionLoading(false);
-    });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) {
-        const { data: profile } = await supabase.from('users').select('*').eq('id', session.user.id).single();
-        if (profile) setUser({ ...profile, password: undefined });
-      } else { setUser(null); setSessionLoading(false); }
     });
     return () => subscription.unsubscribe();
   }, []);
