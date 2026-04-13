@@ -23,6 +23,23 @@ const DB = {
   },
 };
 
+// ─── Distance helpers ─────────────────────────────────────────────────────
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 3958.8;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+async function postalToLatLng(postal) {
+  try {
+    const r = await fetch(`https://api.zippopotam.us/us/${encodeURIComponent(postal.trim())}`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    return { lat: parseFloat(d.places[0].latitude), lng: parseFloat(d.places[0].longitude) };
+  } catch { return null; }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTH CONTEXT
 // ═══════════════════════════════════════════════════════════════════════════
@@ -363,17 +380,121 @@ function ProfileModal({ u, onClose }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // LOBBY
 // ═══════════════════════════════════════════════════════════════════════════
+
+function PostalPromptModal({ onClose, onSave }) {
+  const [val, setVal] = useState("");
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth:380 }}>
+        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.6rem", letterSpacing:".02em", marginBottom:".8rem" }}>YOUR LOCATION</div>
+        <p style={{ fontFamily:"var(--font-serif)", fontStyle:"italic", color:"var(--muted)", fontSize:".9rem", marginBottom:"1rem" }}>Enter your ZIP code to filter groups by distance. Saved for this session only.</p>
+        <label>ZIP Code (US)</label>
+        <input value={val} onChange={e=>setVal(e.target.value)} placeholder="e.g. 92037" maxLength={10} onKeyDown={e=>e.key==="Enter"&&val.trim()&&(onSave(val.trim()),onClose())}/>
+        <div style={{ display:"flex", gap:".6rem", marginTop:"1rem", justifyContent:"flex-end" }}>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-orange" onClick={() => { onSave(val.trim()); onClose(); }} disabled={!val.trim()}>Save →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApplyModal({ g, onClose, onSubmit }) {
+  const toast = useToast();
+  const [f, setF] = useState({ gpa:"", sat:"", act:"", message:"" });
+  const s = (k, v) => setF(p => ({...p, [k]:v}));
+  const reqs = g.requirements || {};
+  function submit() {
+    if (f.message && !passesContentPolicy(f.message)) { toast("Content not allowed.", "error"); return; }
+    onSubmit({ gpa: f.gpa, sat: f.sat, act: f.act, message: sanitize(f.message, 500) });
+    onClose();
+  }
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth:460 }}>
+        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.6rem", letterSpacing:".02em", marginBottom:".4rem" }}>APPLY TO GROUP</div>
+        <div style={{ fontWeight:700, fontSize:".9rem", marginBottom:"1.2rem", color:"var(--muted)" }}>{g.name}</div>
+        {(reqs.min_gpa || reqs.min_sat || reqs.min_act || reqs.text) && (
+          <div style={{ background:"var(--paper2)", border:"1.5px solid var(--paper3)", padding:".8rem", marginBottom:"1.2rem", fontSize:".82rem" }}>
+            <div style={{ fontWeight:700, fontSize:".6rem", letterSpacing:".07em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".4rem" }}>Requirements</div>
+            {reqs.min_gpa && <div>Min GPA: <strong>{reqs.min_gpa}</strong></div>}
+            {reqs.min_sat && <div>Min SAT: <strong>{reqs.min_sat}</strong></div>}
+            {reqs.min_act && <div>Min ACT: <strong>{reqs.min_act}</strong></div>}
+            {reqs.text && <div style={{ marginTop:".4rem", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>{reqs.text}</div>}
+          </div>
+        )}
+        <div style={{ display:"flex", flexDirection:"column", gap:".7rem" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:".6rem" }}>
+            <div><label>Your GPA</label><input value={f.gpa} onChange={e=>s("gpa",e.target.value)} placeholder="4.0" maxLength={6}/></div>
+            <div><label>SAT Score</label><input value={f.sat} onChange={e=>s("sat",e.target.value)} placeholder="1500" maxLength={6}/></div>
+            <div><label>ACT Score</label><input value={f.act} onChange={e=>s("act",e.target.value)} placeholder="34" maxLength={4}/></div>
+          </div>
+          <div>
+            <label>Message to Leader</label>
+            <textarea rows={3} value={f.message} onChange={e=>s("message",e.target.value)} placeholder="Tell the leader why you want to join…" maxLength={500}/>
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:".6rem", marginTop:"1.2rem", justifyContent:"flex-end" }}>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-orange" onClick={submit}>Submit Application →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApplicationsModal({ g, onClose, onApprove, onDecline }) {
+  const apps = (g.applications || []).filter(a => a.status === "pending");
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth:540 }}>
+        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.6rem", letterSpacing:".02em", marginBottom:".4rem" }}>APPLICATIONS</div>
+        <div style={{ fontWeight:700, fontSize:".85rem", marginBottom:"1.2rem", color:"var(--muted)" }}>{g.name} · {apps.length} pending</div>
+        {apps.length === 0 ? (
+          <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>No pending applications.</p>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:".8rem" }}>
+            {apps.map((a, i) => (
+              <div key={i} style={{ border:"1.5px solid var(--paper3)", padding:"1rem", background:"var(--paper2)" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:".45rem" }}>
+                  <div style={{ fontWeight:700, fontSize:".9rem" }}>{a.name}</div>
+                  <div style={{ fontSize:".65rem", color:"var(--muted)", fontWeight:600, letterSpacing:".04em" }}>{ago(a.ts)}</div>
+                </div>
+                <div style={{ display:"flex", gap:"1rem", fontSize:".78rem", marginBottom:".45rem", flexWrap:"wrap" }}>
+                  {a.gpa && <div><span style={{ fontWeight:600, color:"var(--muted)" }}>GPA:</span> {a.gpa}</div>}
+                  {a.sat && <div><span style={{ fontWeight:600, color:"var(--muted)" }}>SAT:</span> {a.sat}</div>}
+                  {a.act && <div><span style={{ fontWeight:600, color:"var(--muted)" }}>ACT:</span> {a.act}</div>}
+                </div>
+                {a.message && <p style={{ fontSize:".8rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", margin:"0 0 .75rem" }}>{a.message}</p>}
+                <div style={{ display:"flex", gap:".5rem" }}>
+                  <button className="btn btn-sm btn-orange" onClick={() => onApprove(a.userId)}>Approve</button>
+                  <button className="btn btn-sm" style={{ background:"var(--red)", color:"var(--paper)", borderColor:"var(--red)" }} onClick={() => onDecline(a.userId)}>Decline</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ marginTop:"1.2rem", display:"flex", justifyContent:"flex-end" }}>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const CAT_BG      = { blue:"var(--blue-lt)",   red:"var(--red-lt)",   green:"var(--green-lt)",   orange:"var(--orange-lt)"   };
 const CAT_ACCENT  = { blue:"var(--blue)",      red:"var(--red)",      green:"var(--green)",      orange:"var(--orange)"      };
 const CAT_SHADOW  = { blue:"#1a3a6b55",        red:"#c0392b55",       green:"#1a6b3c55",         orange:"#e8500a55"          };
 
-function GroupCard({ g, onJoin, userId }) {
+function GroupCard({ g, onJoin, onApply, userId }) {
   const { user: currentUser } = useAuth();
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileUser, setProfileUser] = useState(null);
-  const cat   = CATS.find(c => c.id === g.category);
-  const isIn  = g.members.includes(userId);
-  const full  = g.members.length >= g.max;
+  const cat        = CATS.find(c => c.id === g.category);
+  const isIn       = g.members.includes(userId);
+  const full       = g.members.length >= g.max;
+  const groupType  = g.group_type || "open";
+  const hasApplied = (g.applications || []).some(a => a.userId === userId && a.status === "pending");
   const cardBg     = CAT_BG[cat?.color]     || "var(--chalk)";
   const cardAccent = CAT_ACCENT[cat?.color] || "var(--ink)";
   const cardShadow = CAT_SHADOW[cat?.color] || "rgba(15,14,13,.35)";
@@ -401,6 +522,8 @@ function GroupCard({ g, onJoin, userId }) {
         <p style={{ fontSize:".83rem", color:"var(--muted)", lineHeight:1.6, fontStyle:"italic", fontFamily:"var(--font-serif)" }}>{g.desc}</p>
         <div style={{ display:"flex", flexWrap:"wrap", gap:".3rem" }}>
           {g.tags.map(t => <span key={t} className="tag" style={{ fontSize:".6rem" }}>{t}</span>)}
+          {groupType === "invite_only" && <span className="tag" style={{ fontSize:".6rem", background:"var(--blue)", color:"var(--paper)", border:"none" }}>Invite Only</span>}
+          {groupType === "closed"      && <span className="tag" style={{ fontSize:".6rem", background:"var(--red)",  color:"var(--paper)", border:"none" }}>Closed</span>}
         </div>
         <div style={{ borderTop:"1.5px solid var(--paper3)", paddingTop:".85rem" }}>
           <MemberBar count={g.members.length} max={g.max}/>
@@ -409,9 +532,19 @@ function GroupCard({ g, onJoin, userId }) {
               <span style={{ fontSize:".65rem", color:"var(--muted2)", textTransform:"uppercase", letterSpacing:".05em", fontWeight:600 }}>{ago(g.ts)}</span>
               <button onClick={openCreator} style={{ background:"none", border:"none", padding:0, cursor:"pointer", fontSize:".6rem", color:"var(--muted2)", fontFamily:"var(--font-body)", textDecoration:"underline dotted" }}>· {g.byName}</button>
             </div>
-            {isIn  ? <span className="tag tag-green">✓ Joined</span>
-            : full  ? <span style={{ fontSize:".72rem", color:"var(--muted)", fontWeight:600, textTransform:"uppercase", letterSpacing:".05em" }}>Full</span>
-            : <button className="btn btn-sm" onClick={() => onJoin(g.id)}>Join →</button>}
+            {isIn ? (
+              <span className="tag tag-green">✓ Joined</span>
+            ) : full ? (
+              <span style={{ fontSize:".72rem", color:"var(--muted)", fontWeight:600, textTransform:"uppercase", letterSpacing:".05em" }}>Full</span>
+            ) : groupType === "closed" ? (
+              <span style={{ fontSize:".72rem", color:"var(--muted)", fontWeight:600, textTransform:"uppercase", letterSpacing:".05em" }}>Closed</span>
+            ) : groupType === "invite_only" ? (
+              hasApplied
+                ? <span style={{ fontSize:".72rem", color:"var(--blue)", fontWeight:600, textTransform:"uppercase", letterSpacing:".05em" }}>Applied</span>
+                : <button className="btn btn-sm" onClick={() => onApply(g)}>Apply →</button>
+            ) : (
+              <button className="btn btn-sm" onClick={() => onJoin(g.id)}>Join →</button>
+            )}
           </div>
         </div>
       </div>
@@ -421,7 +554,7 @@ function GroupCard({ g, onJoin, userId }) {
 }
 
 function CreateModal({ onClose, onCreate, userId, userName }) {
-  const [f, setF]           = useState({ name:"", category:"", sub:"", location:"", remote:false, desc:"", tags:"", max:8 });
+  const [f, setF]           = useState({ name:"", category:"", sub:"", location:"", remote:false, desc:"", tags:"", max:8, group_type:"open", postal_code:"", min_gpa:"", min_sat:"", min_act:"", req_text:"" });
   const [errors, setErrors] = useState({});
   const s = (k, v) => { setF(p=>({...p,[k]:v})); setErrors(p=>({...p,[k]:""})); };
 
@@ -433,26 +566,37 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
     if (!f.category)                             e.category = "Select a category.";
     if (!Validators.minLen(f.desc, 20))          e.desc     = "Describe your group in at least 20 characters.";
     if (!Validators.noScript(f.desc))            e.desc     = "Invalid characters.";
+    if (f.req_text && !Validators.noScript(f.req_text)) e.req_text = "Invalid characters.";
     return e;
   }
 
   function submit() {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
+    const reqs = f.group_type === "invite_only" ? {
+      ...(f.min_gpa  ? { min_gpa:  parseFloat(f.min_gpa)  } : {}),
+      ...(f.min_sat  ? { min_sat:  parseInt(f.min_sat)    } : {}),
+      ...(f.min_act  ? { min_act:  parseInt(f.min_act)    } : {}),
+      ...(f.req_text ? { req_text: sanitize(f.req_text, 200) } : {}),
+    } : {};
     onCreate({
       id: "g" + Date.now(),
-      name:     sanitize(f.name, 80),
-      category: f.category,
-      sub:      sanitize(f.sub, 60) || f.category,
-      location: f.remote ? "Remote" : sanitize(f.location, 60) || "Remote",
-      remote:   f.remote,
-      members:  [userId],
-      max:      Math.min(50, Math.max(2, Number(f.max) || 8)),
-      desc:     sanitize(f.desc, 500),
-      tags:     f.tags.split(",").map(t => sanitize(t.trim(), 30)).filter(Boolean).slice(0, 8),
-      byId:     userId,
-      byName:   userName,
-      ts:       Date.now(),
+      name:       sanitize(f.name, 80),
+      category:   f.category,
+      sub:        sanitize(f.sub, 60) || f.category,
+      location:   f.remote ? "Remote" : sanitize(f.location, 60) || "Remote",
+      remote:     f.remote,
+      members:    [userId],
+      max:        Math.min(50, Math.max(2, Number(f.max) || 8)),
+      desc:       sanitize(f.desc, 500),
+      tags:       f.tags.split(",").map(t => sanitize(t.trim(), 30)).filter(Boolean).slice(0, 8),
+      byId:       userId,
+      byName:     userName,
+      ts:         Date.now(),
+      group_type: f.group_type,
+      postal_code: f.remote ? "" : sanitize(f.postal_code, 10),
+      requirements: reqs,
+      applications: [],
     });
     onClose();
   }
@@ -482,14 +626,44 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
             <input type="checkbox" id="rm" checked={f.remote} onChange={e=>s("remote",e.target.checked)} style={{ width:"auto", accentColor:"var(--orange)" }}/>
             <label htmlFor="rm" style={{ margin:0, textTransform:"none", fontSize:".85rem", letterSpacing:0, color:"var(--ink)" }}>This group meets remotely</label>
           </div>
-          {!f.remote && <div><label>Location</label><input value={f.location} onChange={e=>s("location",e.target.value)} placeholder="City, State" maxLength={60}/></div>}
+          {!f.remote && (
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".7rem" }}>
+              <div><label>Location</label><input value={f.location} onChange={e=>s("location",e.target.value)} placeholder="City, State" maxLength={60}/></div>
+              <div><label>Postal Code (US)</label><input value={f.postal_code} onChange={e=>s("postal_code",e.target.value)} placeholder="e.g. 92037" maxLength={10}/></div>
+            </div>
+          )}
           <div>
             <label>Description *</label>
             <textarea rows={3} value={f.desc} onChange={e=>s("desc",e.target.value)} placeholder="What does your group do?" className={errors.desc?"error":""} maxLength={500}/>
             {errors.desc && <div className="field-error">{errors.desc}</div>}
           </div>
           <div><label>Tags (comma-separated, max 8)</label><input value={f.tags} onChange={e=>s("tags",e.target.value)} placeholder="Java, CAD, Fundraising" maxLength={200}/></div>
-          <div><label>Max Members</label><input type="number" min={2} max={50} value={f.max} onChange={e=>s("max",e.target.value)}/></div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".7rem" }}>
+            <div><label>Max Members</label><input type="number" min={2} max={50} value={f.max} onChange={e=>s("max",e.target.value)}/></div>
+            <div>
+              <label>Group Type</label>
+              <select value={f.group_type} onChange={e=>s("group_type",e.target.value)}>
+                <option value="open">Open — anyone can join</option>
+                <option value="invite_only">Invite Only — apply to join</option>
+                <option value="closed">Closed — no new members</option>
+              </select>
+            </div>
+          </div>
+          {f.group_type === "invite_only" && (
+            <div style={{ border:"1.5px solid var(--paper3)", borderRadius:4, padding:".85rem", display:"flex", flexDirection:"column", gap:".7rem" }}>
+              <div style={{ fontSize:".72rem", fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)" }}>Requirements to Apply (all optional)</div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:".6rem" }}>
+                <div><label>Min GPA</label><input type="number" min={0} max={4} step={0.01} value={f.min_gpa} onChange={e=>s("min_gpa",e.target.value)} placeholder="e.g. 3.5"/></div>
+                <div><label>Min SAT</label><input type="number" min={400} max={1600} value={f.min_sat} onChange={e=>s("min_sat",e.target.value)} placeholder="e.g. 1400"/></div>
+                <div><label>Min ACT</label><input type="number" min={1} max={36} value={f.min_act} onChange={e=>s("min_act",e.target.value)} placeholder="e.g. 30"/></div>
+              </div>
+              <div>
+                <label>Custom Requirement Text</label>
+                <textarea rows={2} value={f.req_text} onChange={e=>s("req_text",e.target.value)} placeholder="e.g. Must be available weekends…" maxLength={200} className={errors.req_text?"error":""}/>
+                {errors.req_text && <div className="field-error">{errors.req_text}</div>}
+              </div>
+            </div>
+          )}
         </div>
         <div style={{ display:"flex", gap:".6rem", marginTop:"1.4rem", justifyContent:"flex-end" }}>
           <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
@@ -503,10 +677,54 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
 function LobbyPage({ groups, setGroups, initCat }) {
   const { user } = useAuth();
   const toast    = useToast();
-  const [q, setQ]         = useState("");
-  const [cat, setCat]     = useState(initCat || "all");
-  const [fmt, setFmt]     = useState("all");
-  const [modal, setModal] = useState(false);
+  const [q, setQ]               = useState("");
+  const [cat, setCat]           = useState(initCat || "all");
+  const [fmt, setFmt]           = useState("all");
+  const [modal, setModal]       = useState(false);
+  const [dist, setDist]         = useState("any");
+  const [userPostal, setUserPostal] = useState(() => { try { return sessionStorage.getItem("ec:postal") || ""; } catch { return ""; } });
+  const [userCoords, setUserCoords] = useState(null);
+  const [postalPrompt, setPostalPrompt] = useState(false);
+  const [passDistIds, setPassDistIds]   = useState(null); // null = not yet computed
+  const [applyGroup, setApplyGroup]     = useState(null);
+  const coordCache = useRef({});
+
+  // Resolve user coords when postal changes
+  useEffect(() => {
+    if (!userPostal) { setUserCoords(null); return; }
+    if (coordCache.current[userPostal]) { setUserCoords(coordCache.current[userPostal]); return; }
+    postalToLatLng(userPostal).then(c => {
+      if (c) { coordCache.current[userPostal] = c; setUserCoords(c); }
+      else { toast("Couldn't find that ZIP code.", "warning"); setUserCoords(null); }
+    });
+  }, [userPostal]);
+
+  // Compute passing group IDs when dist / userCoords / groups change
+  useEffect(() => {
+    if (dist === "any") { setPassDistIds(null); return; }
+    if (!userCoords) { setPassDistIds(null); return; }
+    const miles = dist === "25" ? 25 : dist === "50" ? 50 : 100;
+    const resolveCoordsAndFilter = async () => {
+      const passing = new Set();
+      await Promise.all(groups.map(async g => {
+        if (g.remote || !g.postal_code) { passing.add(g.id); return; }
+        let gc = coordCache.current[g.postal_code];
+        if (!gc) {
+          gc = await postalToLatLng(g.postal_code);
+          if (gc) coordCache.current[g.postal_code] = gc;
+        }
+        if (!gc) { passing.add(g.id); return; } // can't determine — include by default
+        if (haversine(userCoords.lat, userCoords.lng, gc.lat, gc.lng) <= miles) passing.add(g.id);
+      }));
+      setPassDistIds(passing);
+    };
+    resolveCoordsAndFilter();
+  }, [dist, userCoords, groups]);
+
+  function handleDistChange(val) {
+    if (val !== "any" && !userPostal) { setPostalPrompt(true); }
+    setDist(val);
+  }
 
   function join(id) {
     const g = groups.find(x => x.id === id);
@@ -516,11 +734,21 @@ function LobbyPage({ groups, setGroups, initCat }) {
     toast(`Joined "${g.name}"!`, "success");
   }
 
+  function apply(id, appData) {
+    setGroups(gs => gs.map(g => {
+      if (g.id !== id) return g;
+      const apps = g.applications || [];
+      return { ...g, applications: [...apps, { userId: user.id, name: user.name, ts: Date.now(), status: "pending", ...appData }] };
+    }));
+    toast("Application submitted!", "success");
+  }
+
   const filtered = groups.filter(g => {
     if (cat !== "all" && g.category !== cat) return false;
     if (fmt === "remote" && !g.remote) return false;
     if (fmt === "local"  &&  g.remote) return false;
     if (q && ![g.name, g.desc, ...g.tags].some(x => x.toLowerCase().includes(q.toLowerCase()))) return false;
+    if (passDistIds !== null && !passDistIds.has(g.id)) return false;
     return true;
   });
 
@@ -541,6 +769,18 @@ function LobbyPage({ groups, setGroups, initCat }) {
           <option value="remote">Remote</option>
           <option value="local">In-Person</option>
         </select>
+        <select value={dist} onChange={e=>handleDistChange(e.target.value)} style={{ maxWidth:180 }}>
+          <option value="any">Any Distance</option>
+          <option value="25">Within 25 miles</option>
+          <option value="50">Within 50 miles</option>
+          <option value="100">Within 100 miles</option>
+        </select>
+        {userPostal && dist !== "any" && (
+          <span style={{ fontSize:".75rem", color:"var(--muted)", fontStyle:"italic", display:"flex", alignItems:"center", gap:".3rem" }}>
+            near {userPostal}
+            <button onClick={() => setPostalPrompt(true)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:".75rem", color:"var(--blue)", padding:0, fontFamily:"var(--font-body)" }}>change</button>
+          </span>
+        )}
       </div>
       <div style={{ display:"flex", gap:".4rem", flexWrap:"wrap", marginBottom:"1.8rem" }}>
         {["all", ...CATS.map(c=>c.id)].map(id => {
@@ -561,10 +801,12 @@ function LobbyPage({ groups, setGroups, initCat }) {
         </div>
       ) : (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(288px,1fr))", gap:"1rem" }}>
-          {filtered.map(g => <GroupCard key={g.id} g={g} onJoin={join} userId={user.id}/>)}
+          {filtered.map(g => <GroupCard key={g.id} g={g} onJoin={join} onApply={(grp) => setApplyGroup(grp)} userId={user.id}/>)}
         </div>
       )}
       {modal && <CreateModal onClose={() => setModal(false)} userId={user.id} userName={user.name} onCreate={g => { setGroups(p=>[g,...p]); setModal(false); toast("Group created!", "success"); }}/>}
+      {postalPrompt && <PostalPromptModal onClose={() => setPostalPrompt(false)} onSave={p => { setUserPostal(p); try { sessionStorage.setItem("ec:postal", p); } catch {} }}/>}
+      {applyGroup && <ApplyModal g={applyGroup} onClose={() => setApplyGroup(null)} onSubmit={(data) => apply(applyGroup.id, data)}/>}
     </div>
   );
 }
@@ -903,6 +1145,7 @@ function CommonAppResults({ caRes, toast }) {
 function MyGroupsPage({ groups, setGroups, goChat }) {
   const { user } = useAuth();
   const toast    = useToast();
+  const [appsModal, setAppsModal] = useState(null); // group object
   const mine     = groups.filter(g => g.members.includes(user.id));
 
   function leave(id) {
@@ -914,6 +1157,25 @@ function MyGroupsPage({ groups, setGroups, goChat }) {
   function deleteGroup(id) {
     setGroups(gs => gs.filter(g => g.id !== id));
     toast("Group deleted.", "success");
+  }
+  function approveApp(groupId, appUserId) {
+    setGroups(gs => gs.map(g => {
+      if (g.id !== groupId) return g;
+      const apps = (g.applications || []).map(a => a.userId === appUserId ? { ...a, status: "approved" } : a);
+      const newMembers = g.members.includes(appUserId) ? g.members : [...g.members, appUserId];
+      return { ...g, applications: apps, members: newMembers };
+    }));
+    setAppsModal(prev => prev ? { ...prev, applications: (prev.applications || []).map(a => a.userId === appUserId ? { ...a, status: "approved" } : a), members: [...(prev.members.includes(appUserId) ? prev.members : [...prev.members, appUserId])] } : null);
+    toast("Application approved.", "success");
+  }
+  function declineApp(groupId, appUserId) {
+    setGroups(gs => gs.map(g => {
+      if (g.id !== groupId) return g;
+      const apps = (g.applications || []).map(a => a.userId === appUserId ? { ...a, status: "declined" } : a);
+      return { ...g, applications: apps };
+    }));
+    setAppsModal(prev => prev ? { ...prev, applications: (prev.applications || []).map(a => a.userId === appUserId ? { ...a, status: "declined" } : a) } : null);
+    toast("Application declined.", "success");
   }
 
   return (
@@ -934,6 +1196,9 @@ function MyGroupsPage({ groups, setGroups, goChat }) {
             const mcBg     = CAT_BG[mcat?.color]     || "var(--chalk)";
             const mcAccent = CAT_ACCENT[mcat?.color] || "var(--ink)";
             const mcShadow = CAT_SHADOW[mcat?.color] || "rgba(15,14,13,.35)";
+            const pendingCount = g.byId === user.id && g.group_type === "invite_only"
+              ? (g.applications || []).filter(a => a.status === "pending").length
+              : 0;
             return (
             <div key={g.id} className="card fade-up" style={{ display:"flex", flexDirection:"column", gap:".8rem", background: mcBg, borderColor: mcAccent, boxShadow: `4px 4px 0 ${mcShadow}` }}>
               <div>
@@ -943,8 +1208,18 @@ function MyGroupsPage({ groups, setGroups, goChat }) {
               <p style={{ fontSize:".83rem", color:"var(--muted)", lineHeight:1.55, fontStyle:"italic", fontFamily:"var(--font-serif)", flex:1 }}>{g.desc}</p>
               <MemberBar count={g.members.length} max={g.max}/>
               <div style={{ borderTop:"1.5px solid var(--paper3)", paddingTop:".75rem", display:"flex", justifyContent:"space-between", alignItems:"center", gap:".5rem", flexWrap:"wrap" }}>
-                {g.byId === user.id ? <span className="tag tag-orange">👑 Owner</span> : <span className="tag tag-blue">Member</span>}
-                <div style={{ display:"flex", gap:".4rem" }}>
+                <div style={{ display:"flex", gap:".4rem", alignItems:"center" }}>
+                  {g.byId === user.id ? <span className="tag tag-orange">👑 Owner</span> : <span className="tag tag-blue">Member</span>}
+                  {pendingCount > 0 && (
+                    <span style={{ background:"var(--red)", color:"#fff", borderRadius:"999px", fontSize:".62rem", fontWeight:700, padding:".1rem .45rem", lineHeight:1.4 }}>{pendingCount}</span>
+                  )}
+                </div>
+                <div style={{ display:"flex", gap:".4rem", flexWrap:"wrap" }}>
+                  {g.byId === user.id && g.group_type === "invite_only" && (
+                    <button className="btn btn-ghost btn-sm" onClick={() => setAppsModal(g)}>
+                      Applications{pendingCount > 0 ? ` (${pendingCount})` : ""}
+                    </button>
+                  )}
                   <button className="btn btn-ghost btn-sm" onClick={() => goChat(g.id)}>💬 Chat</button>
                   {g.byId === user.id
                     ? <button className="btn btn-sm btn-danger" onClick={() => deleteGroup(g.id)}>Delete</button>
@@ -955,6 +1230,7 @@ function MyGroupsPage({ groups, setGroups, goChat }) {
           ); })}
         </div>
       )}
+      {appsModal && <ApplicationsModal g={appsModal} onClose={() => setAppsModal(null)} onApprove={(uid) => approveApp(appsModal.id, uid)} onDecline={(uid) => declineApp(appsModal.id, uid)}/>}
     </div>
   );
 }
