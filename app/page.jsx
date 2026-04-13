@@ -483,6 +483,8 @@ function AdvisorPage({ goLobby }) {
   const [f, setF]           = useState({ gpa:"", sat:"", act:"", major:"", interests:"", activities:"" });
   const [loading, setLoading] = useState(false);
   const [res, setRes]       = useState(null);
+  const [caLoading, setCaLoading] = useState(false);
+  const [caRes, setCaRes]   = useState(null);
   const set = (k, v) => setF(p => ({...p,[k]:v}));
   const remaining = ClientRateLimit.remaining("claude");
 
@@ -507,6 +509,53 @@ Rules: 5-7 schools, 4-6 activities, be specific and realistic.`;
       else { setRes({error:true}); toast("Analysis failed. Try again.", "error"); }
     }
     setLoading(false);
+  }
+
+  async function formatForCommonApp() {
+    if (!res?.activities) return;
+    if (remaining <= 0) { toast("AI request limit reached. Try again in a minute.", "error"); return; }
+    setCaLoading(true); setCaRes(null);
+    try {
+      const sys = `You are a Common App expert. Return ONLY valid JSON, no markdown, no backticks:
+{
+  "activities": [
+    {
+      "activity_type": "one of: Academic, Art, Athletics: Club, Athletics: JV/Varsity, Career-Oriented, Community Service (Volunteer), Computer/Technology, Cultural, Dance, Debate/Speech, Environmental, Family Responsibilities, Foreign Exchange, Journalism/Publication, Junior R.O.T.C., LGBT, Music: Instrumental, Music: Vocal, Religious, Research, Robotics, School Spirit, Science/Math, Social Justice, Student Govt./Politics, Theater/Drama, Work (paid), Other Club/Activity",
+      "position": "max 50 characters",
+      "org_name": "max 100 characters",
+      "description": "max 150 characters, strong action verbs, quantify impact",
+      "grades": ["9","10","11","12"],
+      "timing": "During school year OR During school break OR All year",
+      "hours_per_week": 0,
+      "weeks_per_year": 0
+    }
+  ],
+  "awards": [
+    {
+      "title": "max 100 characters",
+      "grades": ["9","10","11","12"],
+      "recognition": "School OR State/Regional OR National OR International"
+    }
+  ]
+}
+Rules:
+- Return exactly 10 activities and up to 5 awards
+- STRICTLY enforce character limits
+- Pick activity_type from the exact list provided`;
+      const prompt = `Student major: ${f.major}
+Interests: ${f.interests}
+Current activities: ${f.activities}
+GPA: ${f.gpa}, SAT: ${f.sat}, ACT: ${f.act}
+Advisor recommended activities: ${res.activities.map(a => `${a.name}: ${a.why}`).join(', ')}`;
+      const raw = await callClaude(sys, prompt, [], { maxTokens: 2000 });
+      const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      if (!parsed.activities) throw new Error("bad shape");
+      setCaRes(parsed);
+    } catch(e) {
+      if (e.message === "RATE_LIMITED") toast("Rate limit reached. Wait 1 minute.", "error");
+      else { setCaRes({ error: true }); toast("Formatting failed. Try again.", "error"); }
+    }
+    setCaLoading(false);
   }
 
   const TC = { Reach:"var(--red)", Match:"var(--blue)", Safety:"var(--green)" };
@@ -586,11 +635,105 @@ Rules: 5-7 schools, 4-6 activities, be specific and realistic.`;
                   ))}
                 </div>
                 <button className="btn btn-orange" style={{ width:"100%", justifyContent:"center" }} onClick={goLobby}>Find Groups in Lobby →</button>
+                <button className="btn" style={{ width:"100%", justifyContent:"center", marginTop:".6rem", background:"var(--ink)", color:"var(--paper)" }} onClick={formatForCommonApp} disabled={caLoading}>
+                  {caLoading ? <><Spinner size={14}/>Formatting…</> : "Format for Common App →"}
+                </button>
               </div>
+              {caLoading && (
+                <div style={{ border:"2px solid var(--ink)", padding:"3rem", textAlign:"center", boxShadow:"4px 4px 0 var(--ink)", background:"var(--chalk)" }}>
+                  <Spinner size={28}/>
+                  <div style={{ marginTop:"1rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>Formatting for Common App…</div>
+                </div>
+              )}
+              {caRes?.error && <div style={{ border:"2px solid var(--red)", padding:"1rem", color:"var(--red)", fontWeight:600 }}>Formatting failed. Try again.</div>}
+              {caRes && !caRes.error && <CommonAppResults caRes={caRes} toast={toast}/>}
             </>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMMON APP RESULTS
+// ═══════════════════════════════════════════════════════════════════════════
+function CommonAppResults({ caRes, toast }) {
+  function cc(text, max) {
+    const len = (text || "").length;
+    return <span style={{ fontSize:".63rem", fontWeight:700, color:len > max ? "var(--red)" : "var(--muted)", marginLeft:".3rem" }}>{len}/{max}</span>;
+  }
+  function copyText(text) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    toast("Copied!", "success");
+  }
+  function activityText(a, i) {
+    return [
+      `[${i+1}] ${a.org_name}`,
+      `Activity Type: ${a.activity_type}`,
+      `Position/Leadership: ${a.position}`,
+      `Description: ${a.description}`,
+      `Grades: ${(a.grades||[]).join(", ")}`,
+      `Timing: ${a.timing}`,
+      `Hours/week: ${a.hours_per_week} | Weeks/year: ${a.weeks_per_year}`,
+    ].join("\n");
+  }
+  function awardText(a, i) {
+    return [
+      `[${i+1}] ${a.title}`,
+      `Grades: ${(a.grades||[]).join(", ")}`,
+      `Recognition: ${a.recognition}`,
+    ].join("\n");
+  }
+  function copyAll() {
+    const acts = (caRes.activities||[]).map((a,i) => activityText(a,i)).join("\n\n");
+    const awds = (caRes.awards||[]).map((a,i) => awardText(a,i)).join("\n\n");
+    copyText(`=== ACTIVITIES ===\n\n${acts}${awds ? `\n\n=== HONORS & AWARDS ===\n\n${awds}` : ""}`);
+  }
+
+  return (
+    <div className="card fade-up">
+      <div style={{ fontFamily:"var(--font-display)", fontSize:"1.2rem", letterSpacing:".04em", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>COMMON APP FORMAT</div>
+
+      <div style={{ fontFamily:"var(--font-display)", fontSize:".9rem", letterSpacing:".04em", marginBottom:".6rem", color:"var(--orange)" }}>ACTIVITIES</div>
+      <div style={{ display:"flex", flexDirection:"column", gap:".7rem", marginBottom:"1.5rem" }}>
+        {(caRes.activities||[]).map((a,i) => (
+          <div key={i} style={{ padding:".8rem", background:"var(--paper2)", border:"1px solid var(--paper3)" }}>
+            <div style={{ fontWeight:700, fontSize:".7rem", letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".5rem" }}>Activity {i+1}</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".35rem .8rem", fontSize:".8rem", marginBottom:".5rem" }}>
+              <div><span style={{ fontWeight:600, color:"var(--muted)" }}>Type:</span> {a.activity_type}</div>
+              <div><span style={{ fontWeight:600, color:"var(--muted)" }}>Grades:</span> {(a.grades||[]).join(", ")}</div>
+              <div style={{ gridColumn:"1/-1" }}><span style={{ fontWeight:600, color:"var(--muted)" }}>Position:</span> {a.position}{cc(a.position, 50)}</div>
+              <div style={{ gridColumn:"1/-1" }}><span style={{ fontWeight:600, color:"var(--muted)" }}>Organization:</span> {a.org_name}{cc(a.org_name, 100)}</div>
+              <div style={{ gridColumn:"1/-1" }}><span style={{ fontWeight:600, color:"var(--muted)" }}>Description:</span> {a.description}{cc(a.description, 150)}</div>
+              <div><span style={{ fontWeight:600, color:"var(--muted)" }}>Timing:</span> {a.timing}</div>
+              <div><span style={{ fontWeight:600, color:"var(--muted)" }}>Hours/wk:</span> {a.hours_per_week} | <span style={{ fontWeight:600, color:"var(--muted)" }}>Wks/yr:</span> {a.weeks_per_year}</div>
+            </div>
+            <button className="btn" style={{ padding:".22rem .65rem", fontSize:".68rem" }} onClick={() => copyText(activityText(a,i))}>Copy</button>
+          </div>
+        ))}
+      </div>
+
+      {(caRes.awards||[]).length > 0 && (
+        <>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:".9rem", letterSpacing:".04em", marginBottom:".6rem", color:"var(--orange)" }}>HONORS & AWARDS</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:".7rem", marginBottom:"1.5rem" }}>
+            {(caRes.awards||[]).map((a,i) => (
+              <div key={i} style={{ padding:".8rem", background:"var(--paper2)", border:"1px solid var(--paper3)" }}>
+                <div style={{ fontWeight:700, fontSize:".7rem", letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".5rem" }}>Award {i+1}</div>
+                <div style={{ display:"flex", flexDirection:"column", gap:".3rem", fontSize:".8rem", marginBottom:".5rem" }}>
+                  <div><span style={{ fontWeight:600, color:"var(--muted)" }}>Title:</span> {a.title}{cc(a.title, 100)}</div>
+                  <div><span style={{ fontWeight:600, color:"var(--muted)" }}>Grades:</span> {(a.grades||[]).join(", ")}</div>
+                  <div><span style={{ fontWeight:600, color:"var(--muted)" }}>Recognition:</span> {a.recognition}</div>
+                </div>
+                <button className="btn" style={{ padding:".22rem .65rem", fontSize:".68rem" }} onClick={() => copyText(awardText(a,i))}>Copy</button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <button className="btn btn-orange" style={{ width:"100%", justifyContent:"center" }} onClick={copyAll}>Copy All →</button>
     </div>
   );
 }
