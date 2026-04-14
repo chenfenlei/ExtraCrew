@@ -39,20 +39,38 @@ function AuthProvider({ children }) {
   const [sessionLoading, setSessionLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (session?.user) {
+    // Timeout fallback — if loading takes more than 5 seconds, give up and show login
+    const timeout = setTimeout(() => {
+      setSessionLoading(false);
+    }, 5000);
+
+    supabase.auth.getSession().then(async ({ data: { session }, error }) => {
+      clearTimeout(timeout);
+      if (error || !session?.user) {
+        // Clear any corrupted auth state
+        await supabase.auth.signOut();
+        setSessionLoading(false);
+        return;
+      }
+      try {
         const { data: profile } = await supabase
           .from("users")
           .select("*")
           .eq("id", session.user.id)
           .single();
         if (profile) setUser({ ...profile, password: undefined });
+      } catch (e) {
+        await supabase.auth.signOut();
       }
       setSessionLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        if (event === "SIGNED_OUT") {
+          setUser(null);
+          return;
+        }
         if (session?.user) {
           const { data: profile } = await supabase
             .from("users")
@@ -60,13 +78,14 @@ function AuthProvider({ children }) {
             .eq("id", session.user.id)
             .single();
           if (profile) setUser({ ...profile, password: undefined });
-        } else {
-          setUser(null);
         }
       }
     );
 
-    return () => subscription.unsubscribe();
+    return () => {
+      clearTimeout(timeout);
+      subscription.unsubscribe();
+    };
   }, []);
 
   async function login(email, password) {
