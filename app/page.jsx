@@ -31,13 +31,12 @@ function haversine(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
-async function postalToLatLng(postal) {
-  try {
-    const r = await fetch(`https://api.zippopotam.us/us/${encodeURIComponent(postal.trim())}`);
-    if (!r.ok) return null;
-    const d = await r.json();
-    return { lat: parseFloat(d.places[0].latitude), lng: parseFloat(d.places[0].longitude) };
-  } catch { return null; }
+function fileIcon(type) {
+  if (!type) return "📎";
+  if (type.startsWith("video/")) return "🎥";
+  if (type.startsWith("audio/")) return "🎵";
+  if (type === "application/pdf") return "📄";
+  return "📎";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -323,26 +322,73 @@ function AuthScreen() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PROFILE MODAL (public view)
+// USER PROFILE MODAL (clickable public view — used everywhere)
 // ═══════════════════════════════════════════════════════════════════════════
-function ProfileModal({ u, onClose }) {
+function UserProfileModal({ userId, u: initialU, onClose }) {
+  const [u, setU] = useState(initialU || null);
+  const [loading, setLoading] = useState(!initialU);
+
+  useEffect(() => {
+    if (initialU) return;
+    supabase.from("users").select("*").eq("id", userId).single().then(({ data }) => {
+      setU(data || null);
+      setLoading(false);
+    });
+  }, [userId]);
+
+  if (loading) return (
+    <div className="modal-overlay">
+      <div className="modal" style={{ maxWidth:460, textAlign:"center", padding:"3rem" }}><Spinner size={28}/></div>
+    </div>
+  );
+  if (!u) return null;
+
+  const showStats = u.stats_public !== false; // hidden only if explicitly false
+  const sl = u.social_links || {};
+
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ maxWidth:500 }}>
+      <div className="modal" style={{ maxWidth:500, maxHeight:"85vh", overflowY:"auto" }}>
+        {/* Header */}
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"1.2rem" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:".9rem" }}>
-            <Avatar name={u.name} size={48}/>
+          <div style={{ display:"flex", alignItems:"center", gap:"1rem" }}>
+            <div style={{ width:56, height:56, borderRadius:"50%", border:"2.5px solid var(--orange)", flexShrink:0, overflow:"hidden", background:"var(--orange-lt)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+              {u.avatar_url
+                ? <img src={u.avatar_url} alt="avatar" style={{ width:"100%", height:"100%", objectFit:"cover" }}/>
+                : <div style={{ fontFamily:"var(--font-display)", fontSize:"1.2rem", color:"var(--orange)" }}>{initials(u.name)}</div>}
+            </div>
             <div>
               <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".03em" }}>{u.name}</div>
-              {u.bio && <p style={{ fontSize:".78rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", lineHeight:1.5, marginTop:".2rem", maxWidth:300 }}>{u.bio}</p>}
+              {u.bio && <p style={{ fontSize:".78rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", lineHeight:1.5, marginTop:".2rem", maxWidth:280 }}>{u.bio}</p>}
+              <div style={{ display:"flex", gap:".3rem", marginTop:".35rem", flexWrap:"wrap" }}>
+                {sl.linkedin  && <a href={sl.linkedin} target="_blank" rel="noopener noreferrer" style={{ fontSize:".7rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .3rem", textDecoration:"none", color:"var(--ink)" }}>in</a>}
+                {sl.instagram && <a href={`https://instagram.com/${sl.instagram}`} target="_blank" rel="noopener noreferrer" style={{ fontSize:".7rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .3rem", textDecoration:"none", color:"var(--ink)" }}>@</a>}
+                {sl.email     && <a href={`mailto:${sl.email}`} style={{ fontSize:".7rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .3rem", textDecoration:"none", color:"var(--ink)" }}>✉</a>}
+                {sl.whatsapp  && <a href={`https://wa.me/${sl.whatsapp}`} target="_blank" rel="noopener noreferrer" style={{ fontSize:".7rem", fontWeight:700, border:"1.5px solid var(--ink)", padding:".1rem .3rem", textDecoration:"none", color:"var(--ink)" }}>WA</a>}
+              </div>
             </div>
           </div>
           <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
         </div>
+
+        {/* Academic stats */}
+        {showStats && (u.gpa || u.sat || u.act || u.intended_major) && (
+          <div style={{ background:"var(--paper2)", border:"1.5px solid var(--paper3)", padding:".75rem .9rem", marginBottom:"1rem" }}>
+            <div style={{ fontSize:".6rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".5rem" }}>Academic Profile</div>
+            <div style={{ display:"flex", gap:"1.2rem", flexWrap:"wrap", fontSize:".82rem" }}>
+              {u.gpa            && <div><span style={{ color:"var(--muted)", fontWeight:600 }}>GPA </span>{u.gpa}</div>}
+              {u.sat            && <div><span style={{ color:"var(--muted)", fontWeight:600 }}>SAT </span>{u.sat}</div>}
+              {u.act            && <div><span style={{ color:"var(--muted)", fontWeight:600 }}>ACT </span>{u.act}</div>}
+              {u.intended_major && <div><span style={{ color:"var(--muted)", fontWeight:600 }}>Major </span>{u.intended_major}</div>}
+            </div>
+          </div>
+        )}
+
+        {/* Activities */}
         {u.activities?.length > 0 && (
           <>
             <div style={{ fontFamily:"var(--font-display)", fontSize:".85rem", letterSpacing:".04em", marginBottom:".55rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".4rem" }}>ACTIVITIES</div>
-            <div style={{ display:"flex", flexDirection:"column", gap:".4rem", marginBottom:"1rem" }}>
+            <div style={{ display:"flex", flexDirection:"column", gap:".4rem", marginBottom:"1rem", maxHeight:200, overflowY:"auto" }}>
               {u.activities.map((a, i) => (
                 <div key={i} style={{ padding:".5rem .7rem", background:"var(--paper2)", border:"1px solid var(--paper3)", fontSize:".8rem" }}>
                   <div style={{ fontWeight:700 }}>{a.position}{a.org_name ? ` — ${a.org_name}` : ""}</div>
@@ -353,10 +399,12 @@ function ProfileModal({ u, onClose }) {
             </div>
           </>
         )}
+
+        {/* Awards */}
         {u.awards?.length > 0 && (
           <>
             <div style={{ fontFamily:"var(--font-display)", fontSize:".85rem", letterSpacing:".04em", marginBottom:".55rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".4rem" }}>HONORS & AWARDS</div>
-            <div style={{ display:"flex", flexDirection:"column", gap:".4rem" }}>
+            <div style={{ display:"flex", flexDirection:"column", gap:".4rem", marginBottom:"1rem" }}>
               {u.awards.map((a, i) => (
                 <div key={i} style={{ padding:".5rem .7rem", background:"var(--paper2)", border:"1px solid var(--paper3)", fontSize:".8rem" }}>
                   <div style={{ fontWeight:700 }}>{a.title}</div>
@@ -369,9 +417,14 @@ function ProfileModal({ u, onClose }) {
             </div>
           </>
         )}
-        {!u.activities?.length && !u.awards?.length && (
-          <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".85rem" }}>No activities or awards added yet.</p>
+
+        {!u.activities?.length && !u.awards?.length && !showStats && (
+          <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".85rem" }}>No public profile info yet.</p>
         )}
+
+        <div style={{ display:"flex", justifyContent:"flex-end", marginTop:".5rem" }}>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>Close</button>
+        </div>
       </div>
     </div>
   );
@@ -381,20 +434,436 @@ function ProfileModal({ u, onClose }) {
 // LOBBY
 // ═══════════════════════════════════════════════════════════════════════════
 
-function PostalPromptModal({ onClose, onSave }) {
-  const [val, setVal] = useState("");
+// ─── Call modal (Whereby embedded room) ──────────────────────────────────
+function CallModal({ title, roomId, type, onClose }) {
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ maxWidth:380 }}>
-        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.6rem", letterSpacing:".02em", marginBottom:".8rem" }}>YOUR LOCATION</div>
-        <p style={{ fontFamily:"var(--font-serif)", fontStyle:"italic", color:"var(--muted)", fontSize:".9rem", marginBottom:"1rem" }}>Enter your ZIP code to filter groups by distance. Saved for this session only.</p>
-        <label>ZIP Code (US)</label>
-        <input value={val} onChange={e=>setVal(e.target.value)} placeholder="e.g. 92037" maxLength={10} onKeyDown={e=>e.key==="Enter"&&val.trim()&&(onSave(val.trim()),onClose())}/>
-        <div style={{ display:"flex", gap:".6rem", marginTop:"1rem", justifyContent:"flex-end" }}>
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn-orange" onClick={() => { onSave(val.trim()); onClose(); }} disabled={!val.trim()}>Save →</button>
+      <div className="modal" style={{ maxWidth:"min(900px,95vw)", padding:0, overflow:"hidden" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:".75rem 1rem", borderBottom:"2px solid var(--ink)", background:"var(--paper2)" }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:"1rem", letterSpacing:".04em" }}>{type === "video" ? "📹" : "📞"} {title}</div>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>✕ End</button>
         </div>
+        <iframe
+          src={`https://whereby.com/extracrew-${roomId}`}
+          allow="camera; microphone; fullscreen; speaker; display-capture"
+          style={{ width:"100%", height:"65vh", border:"none", display:"block" }}
+          title={`${type} call`}
+        />
       </div>
+    </div>
+  );
+}
+
+// ─── Nickname editor (tiny sub-component for GroupInfoPanel) ─────────────
+function NicknameEditor({ current, onSave, onCancel }) {
+  const [v, setV] = useState(current);
+  return (
+    <div style={{ display:"flex", gap:".4rem" }}>
+      <input value={v} onChange={e=>setV(e.target.value)} maxLength={40} style={{ fontSize:".8rem", flex:1 }} autoFocus/>
+      <button className="btn btn-sm btn-orange" onClick={() => onSave(v)}>Save</button>
+      <button className="btn btn-ghost btn-sm" onClick={onCancel}>✕</button>
+    </div>
+  );
+}
+
+// ─── Group info panel (⋯ menu in chat header) ────────────────────────────
+function GroupInfoPanel({ group, groups, setGroups, msgs, userId, onClose }) {
+  const toast   = useToast();
+  const isLeader = group.byId === userId;
+  const fileRef  = useRef(null);
+  const currentGroup = groups.find(g => g.id === group.id) || group;
+
+  const [nickname,     setNickname]     = useState(() => { try { return localStorage.getItem(`ec:nick_${group.id}_${userId}`) || ""; } catch { return ""; } });
+  const [nickEdit,     setNickEdit]     = useState(false);
+  const [muted,        setMuted]        = useState(() => { try { return localStorage.getItem(`ec:mute_${group.id}_${userId}`) === "1"; } catch { return false; } });
+  const [notice,       setNotice]       = useState(currentGroup.notice || "");
+  const [editNotice,   setEditNotice]   = useState(false);
+  const [searchQ,      setSearchQ]      = useState("");
+  const [uploading,    setUploading]    = useState(false);
+  const [editSettings, setEditSettings] = useState(false);
+  const [newType,      setNewType]      = useState(currentGroup.group_type  || "open");
+  const [newMinGpa,    setNewMinGpa]    = useState(currentGroup.requirements?.min_gpa  || "");
+  const [newMinSat,    setNewMinSat]    = useState(currentGroup.requirements?.min_sat  || "");
+  const [newMinAct,    setNewMinAct]    = useState(currentGroup.requirements?.min_act  || "");
+  const [newReqText,   setNewReqText]   = useState(currentGroup.requirements?.req_text || "");
+
+  const threadMsgs   = msgs?.[group.id] || [];
+  const filteredMsgs = searchQ ? threadMsgs.filter(m => (m.text||"").toLowerCase().includes(searchQ.toLowerCase())) : [];
+
+  function saveMuted(val) {
+    setMuted(val);
+    try { localStorage.setItem(`ec:mute_${group.id}_${userId}`, val ? "1" : "0"); } catch {}
+  }
+  function saveNickname(val) {
+    const clean = sanitize(val, 40);
+    setNickname(clean); setNickEdit(false);
+    try { localStorage.setItem(`ec:nick_${group.id}_${userId}`, clean); } catch {}
+    toast("Nickname updated!", "success");
+  }
+  function saveNotice() {
+    const clean = sanitize(notice, 300);
+    setGroups(gs => gs.map(g => g.id === group.id ? { ...g, notice: clean } : g));
+    setEditNotice(false);
+    toast("Notice updated!", "success");
+  }
+  function saveSettings() {
+    if (newReqText && !Validators.noScript(newReqText)) { toast("Invalid characters.", "error"); return; }
+    const reqs = {
+      ...(newMinGpa  ? { min_gpa:  parseFloat(newMinGpa)  } : {}),
+      ...(newMinSat  ? { min_sat:  parseInt(newMinSat)    } : {}),
+      ...(newMinAct  ? { min_act:  parseInt(newMinAct)    } : {}),
+      ...(newReqText ? { req_text: sanitize(newReqText, 200) } : {}),
+    };
+    setGroups(gs => gs.map(g => g.id === group.id ? { ...g, group_type: newType, requirements: reqs } : g));
+    setEditSettings(false);
+    toast("Group settings updated!", "success");
+  }
+  async function uploadAvatar(file) {
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { toast("Image must be under 5MB.", "warning"); return; }
+    setUploading(true);
+    const ext  = file.name.split(".").pop();
+    const path = `${group.id}.${ext}`;
+    const { error: upErr } = await supabase.storage.from("group-avatars").upload(path, file, { upsert: true });
+    if (upErr) { toast("Upload failed.", "error"); setUploading(false); return; }
+    const { data } = supabase.storage.from("group-avatars").getPublicUrl(path);
+    setGroups(gs => gs.map(g => g.id === group.id ? { ...g, avatar_url: data.publicUrl } : g));
+    toast("Group photo updated!", "success");
+    setUploading(false);
+  }
+  function leaveGroup() {
+    setGroups(gs => gs.map(g => g.id === group.id ? { ...g, members: g.members.filter(m => m !== userId) } : g));
+    toast("Left the group.", "success");
+    onClose();
+  }
+
+  const reqs = currentGroup.requirements || {};
+
+  return (
+    <div style={{ position:"absolute", top:0, right:0, height:"100%", width:300, background:"var(--paper)", borderLeft:"2px solid var(--ink)", display:"flex", flexDirection:"column", zIndex:30, overflowY:"auto" }}>
+      <div style={{ padding:".8rem 1rem", borderBottom:"2px solid var(--ink)", display:"flex", justifyContent:"space-between", alignItems:"center", background:"var(--paper2)", flexShrink:0 }}>
+        <div style={{ fontFamily:"var(--font-display)", fontSize:".95rem", letterSpacing:".04em" }}>GROUP INFO</div>
+        <button onClick={onClose} style={{ background:"none", border:"none", cursor:"pointer", fontSize:".85rem", fontWeight:700, padding:".2rem .4rem" }}>✕</button>
+      </div>
+
+      <div style={{ padding:"1rem", display:"flex", flexDirection:"column", gap:"1.1rem" }}>
+        {/* Group avatar */}
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:".5rem" }}>
+          <div
+            style={{ width:70, height:70, borderRadius:"50%", border:"3px solid var(--ink)", overflow:"hidden", background:"var(--paper2)", display:"flex", alignItems:"center", justifyContent:"center", cursor:isLeader?"pointer":"default" }}
+            onClick={() => isLeader && fileRef.current?.click()}
+          >
+            {currentGroup.avatar_url
+              ? <img src={currentGroup.avatar_url} alt="group" style={{ width:"100%", height:"100%", objectFit:"cover" }}/>
+              : <div style={{ fontFamily:"var(--font-display)", fontSize:"1.5rem", color:"var(--muted2)" }}>{currentGroup.name?.[0]?.toUpperCase()}</div>}
+          </div>
+          {isLeader && (
+            <>
+              <button className="btn btn-ghost btn-sm" style={{ fontSize:".62rem" }} onClick={() => fileRef.current?.click()} disabled={uploading}>
+                {uploading ? <Spinner size={12}/> : "📷 Change Photo"}
+              </button>
+              <input ref={fileRef} type="file" accept="image/*" style={{ display:"none" }} onChange={e => { const f = e.target.files?.[0]; if (f) uploadAvatar(f); e.target.value = ""; }}/>
+            </>
+          )}
+          <div style={{ fontWeight:700, fontSize:".92rem", textAlign:"center" }}>{currentGroup.name}</div>
+          <div style={{ fontSize:".7rem", color:"var(--muted)", textAlign:"center" }}>{currentGroup.members.length}/{currentGroup.max} members · {currentGroup.sub}</div>
+        </div>
+
+        {/* QR code */}
+        <div style={{ textAlign:"center" }}>
+          <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".4rem" }}>Share Link</div>
+          <img src="https://api.qrserver.com/v1/create-qr-code/?data=extracrew.vercel.app&size=150x150" alt="QR" style={{ border:"2px solid var(--ink)", padding:4, background:"#fff" }}/>
+        </div>
+
+        {/* Notice */}
+        <div>
+          <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".35rem" }}>📌 Notice</div>
+          {editNotice ? (
+            <div>
+              <textarea rows={3} value={notice} onChange={e=>setNotice(e.target.value)} maxLength={300} style={{ width:"100%", fontSize:".8rem" }}/>
+              <div style={{ display:"flex", gap:".4rem", marginTop:".35rem" }}>
+                <button className="btn btn-sm btn-orange" onClick={saveNotice}>Save</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setEditNotice(false)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ fontSize:".8rem", color:currentGroup.notice?"var(--ink)":"var(--muted)", fontStyle:currentGroup.notice?"normal":"italic", fontFamily:currentGroup.notice?"var(--font-body)":"var(--font-serif)", lineHeight:1.5 }}>
+                {currentGroup.notice || "No notice set."}
+              </div>
+              {isLeader && <button onClick={() => { setNotice(currentGroup.notice||""); setEditNotice(true); }} style={{ background:"none", border:"none", cursor:"pointer", fontSize:".62rem", color:"var(--blue)", padding:0, fontFamily:"var(--font-body)", marginTop:".25rem" }}>Edit notice</button>}
+            </div>
+          )}
+        </div>
+
+        {/* Requirements */}
+        {(reqs.min_gpa || reqs.min_sat || reqs.min_act || reqs.req_text) && (
+          <div style={{ background:"var(--paper2)", border:"1.5px solid var(--paper3)", padding:".65rem .75rem" }}>
+            <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".4rem" }}>Requirements to Join</div>
+            <div style={{ fontSize:".78rem", display:"flex", flexDirection:"column", gap:".2rem" }}>
+              {reqs.min_gpa  && <div>Min GPA: <strong>{reqs.min_gpa}</strong></div>}
+              {reqs.min_sat  && <div>Min SAT: <strong>{reqs.min_sat}</strong></div>}
+              {reqs.min_act  && <div>Min ACT: <strong>{reqs.min_act}</strong></div>}
+              {reqs.req_text && <div style={{ fontStyle:"italic", fontFamily:"var(--font-serif)", marginTop:".2rem" }}>{reqs.req_text}</div>}
+            </div>
+          </div>
+        )}
+
+        {/* Members */}
+        <div>
+          <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".35rem" }}>Members ({currentGroup.members.length})</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:".25rem", maxHeight:160, overflowY:"auto" }}>
+            {currentGroup.members.map((mid, idx) => (
+              <div key={mid} style={{ display:"flex", alignItems:"center", gap:".45rem", padding:".3rem .4rem", background:"var(--paper2)", fontSize:".78rem" }}>
+                <div style={{ width:22, height:22, borderRadius:"50%", background:"var(--paper3)", border:"1px solid var(--paper3)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:".55rem", fontWeight:700, flexShrink:0 }}>{idx+1}</div>
+                <span style={{ flex:1 }}>{mid === userId ? `You` : mid === currentGroup.byId ? currentGroup.byName : "Member"}</span>
+                {mid === currentGroup.byId && <span style={{ fontSize:".52rem", fontWeight:700, color:"var(--orange)", letterSpacing:".04em" }}>LEADER</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Mute */}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <span style={{ fontSize:".8rem", fontWeight:600 }}>🔔 Mute notifications</span>
+          <button onClick={() => saveMuted(!muted)} style={{ background:muted?"var(--ink)":"transparent", color:muted?"var(--paper)":"var(--ink)", border:"2px solid var(--ink)", padding:".22rem .6rem", fontSize:".7rem", fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", letterSpacing:".05em" }}>
+            {muted ? "Muted" : "Mute"}
+          </button>
+        </div>
+
+        {/* Nickname */}
+        <div>
+          <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".3rem" }}>My Nickname</div>
+          {nickEdit
+            ? <NicknameEditor current={nickname} onSave={saveNickname} onCancel={() => setNickEdit(false)}/>
+            : <div style={{ display:"flex", alignItems:"center", gap:".5rem" }}>
+                <span style={{ fontSize:".82rem" }}>{nickname || "(none)"}</span>
+                <button onClick={() => setNickEdit(true)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:".62rem", color:"var(--blue)", padding:0, fontFamily:"var(--font-body)" }}>Edit</button>
+              </div>}
+        </div>
+
+        {/* Search messages */}
+        <div>
+          <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".3rem" }}>🔍 Search Messages</div>
+          <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search chat history…" style={{ fontSize:".8rem" }}/>
+          {searchQ && (
+            <div style={{ marginTop:".4rem", maxHeight:110, overflowY:"auto", display:"flex", flexDirection:"column", gap:".2rem" }}>
+              {filteredMsgs.length === 0
+                ? <div style={{ fontSize:".72rem", color:"var(--muted)", fontStyle:"italic" }}>No messages found.</div>
+                : filteredMsgs.map(m => (
+                    <div key={m.id} style={{ fontSize:".72rem", background:"var(--paper2)", padding:".28rem .45rem", border:"1px solid var(--paper3)" }}>
+                      <span style={{ fontWeight:700, color:avatarColor(m.senderName) }}>{m.senderName}: </span>
+                      {(m.text||"").slice(0,60)}{(m.text||"").length>60?"…":""}
+                    </div>
+                  ))}
+            </div>
+          )}
+        </div>
+
+        {/* Leader settings */}
+        {isLeader && (
+          <div style={{ border:"1.5px solid var(--paper3)", padding:".75rem", background:"var(--paper2)" }}>
+            <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--orange)", marginBottom:".6rem" }}>Leader Settings</div>
+            {editSettings ? (
+              <div style={{ display:"flex", flexDirection:"column", gap:".55rem" }}>
+                <div>
+                  <label style={{ fontSize:".62rem" }}>Group Type</label>
+                  <select value={newType} onChange={e=>setNewType(e.target.value)} style={{ fontSize:".8rem" }}>
+                    <option value="open">Open — anyone can join</option>
+                    <option value="invite_only">Invite Only — apply to join</option>
+                    <option value="closed">Closed — no new members</option>
+                  </select>
+                </div>
+                <div style={{ fontSize:".58rem", fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)" }}>Requirements (optional)</div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:".35rem" }}>
+                  <div><label style={{ fontSize:".58rem" }}>Min GPA</label><input type="number" value={newMinGpa} onChange={e=>setNewMinGpa(e.target.value)} style={{ fontSize:".75rem" }}/></div>
+                  <div><label style={{ fontSize:".58rem" }}>Min SAT</label><input type="number" value={newMinSat} onChange={e=>setNewMinSat(e.target.value)} style={{ fontSize:".75rem" }}/></div>
+                  <div><label style={{ fontSize:".58rem" }}>Min ACT</label><input type="number" value={newMinAct} onChange={e=>setNewMinAct(e.target.value)} style={{ fontSize:".75rem" }}/></div>
+                </div>
+                <div>
+                  <label style={{ fontSize:".58rem" }}>Custom Text</label>
+                  <textarea rows={2} value={newReqText} onChange={e=>setNewReqText(e.target.value)} maxLength={200} style={{ fontSize:".76rem" }}/>
+                </div>
+                <div style={{ display:"flex", gap:".4rem" }}>
+                  <button className="btn btn-sm btn-orange" onClick={saveSettings}>Save</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setEditSettings(false)}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize:".78rem", marginBottom:".45rem" }}>Type: <strong>{currentGroup.group_type || "open"}</strong></div>
+                <button className="btn btn-ghost btn-sm" onClick={() => setEditSettings(true)} style={{ fontSize:".62rem" }}>Edit Type & Requirements</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Leave */}
+        {currentGroup.byId !== userId && (
+          <button className="btn btn-sm btn-danger" onClick={leaveGroup} style={{ width:"100%" }}>Leave Group</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Friends page ─────────────────────────────────────────────────────────
+function FriendsPage() {
+  const { user } = useAuth();
+  const toast    = useToast();
+  const [searchEmail, setSearchEmail] = useState("");
+  const [searching,   setSearching]   = useState(false);
+  const [found,       setFound]       = useState(null);
+  const [viewProfile, setViewProfile] = useState(null);
+
+  const load = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key) || "null") || fallback; } catch { return fallback; } };
+  const save = (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} };
+
+  const [friends,  setFriends]  = useState(() => load(`ec:friends_${user?.id}`,  []));
+  const [requests, setRequests] = useState(() => load(`ec:freqs_${user?.id}`,    []));
+  const [sent,     setSent]     = useState(() => load(`ec:fsent_${user?.id}`,    []));
+
+  function saveFriends(v)  { setFriends(v);  save(`ec:friends_${user.id}`, v); }
+  function saveRequests(v) { setRequests(v); save(`ec:freqs_${user.id}`,   v); }
+  function saveSent(v)     { setSent(v);     save(`ec:fsent_${user.id}`,   v); }
+
+  // Pull any incoming requests stored via Supabase
+  useEffect(() => {
+    if (!user?.id) return;
+    supabase.from("users").select("friend_requests, friends").eq("id", user.id).single().then(({ data }) => {
+      if (!data) return;
+      if (data.friend_requests?.length) {
+        const existing = requests.map(r => r.fromId);
+        const newReqs  = (data.friend_requests || []).filter(r => !existing.includes(r.fromId));
+        if (newReqs.length) saveRequests([...requests, ...newReqs]);
+      }
+      if (data.friends?.length) {
+        const existingIds = friends.map(f => f.id);
+        const newF = (data.friends || []).filter(f => !existingIds.includes(f.id));
+        if (newF.length) saveFriends([...friends, ...newF]);
+      }
+    });
+  }, [user?.id]); // eslint-disable-line
+
+  async function searchUser() {
+    const email = searchEmail.trim().toLowerCase();
+    if (!Validators.email(email)) { toast("Enter a valid email.", "warning"); return; }
+    if (email === user.email.toLowerCase()) { toast("That's you!", "warning"); return; }
+    setSearching(true);
+    const { data } = await supabase.from("users").select("id, name, email, avatar, avatar_url").eq("email", email).single();
+    setSearching(false);
+    if (!data) { toast("No user found with that email.", "warning"); setFound(null); return; }
+    setFound(data);
+  }
+
+  async function sendRequest() {
+    if (!found) return;
+    if (friends.some(f => f.id === found.id)) { toast("Already friends!", "info"); return; }
+    if (sent.some(s => s.toId === found.id)) { toast("Request already sent.", "info"); return; }
+    try {
+      const { data: td } = await supabase.from("users").select("friend_requests").eq("id", found.id).single();
+      const prev = td?.friend_requests || [];
+      await supabase.from("users").update({ friend_requests: [...prev, { fromId: user.id, fromName: user.name, fromEmail: user.email, ts: Date.now() }] }).eq("id", found.id);
+    } catch {}
+    saveSent([...sent, { toId: found.id, toName: found.name, toEmail: found.email, ts: Date.now() }]);
+    toast(`Friend request sent to ${found.name}!`, "success");
+    setFound(null); setSearchEmail("");
+  }
+
+  function acceptRequest(req) {
+    const nf = { id: req.fromId, name: req.fromName, email: req.fromEmail, ts: Date.now() };
+    saveFriends([...friends, nf]);
+    saveRequests(requests.filter(r => r.fromId !== req.fromId));
+    try { supabase.from("users").update({ friends: [...friends, nf] }).eq("id", user.id); } catch {}
+    toast(`${req.fromName} is now your friend!`, "success");
+  }
+  function declineRequest(req) {
+    saveRequests(requests.filter(r => r.fromId !== req.fromId));
+    toast("Request declined.", "success");
+  }
+  function removeFriend(fid) {
+    saveFriends(friends.filter(f => f.id !== fid));
+    toast("Friend removed.", "success");
+  }
+
+  return (
+    <div style={{ padding:"2rem 0", maxWidth:680, margin:"0 auto" }}>
+      <div style={{ borderBottom:"2px solid var(--ink)", paddingBottom:"1.5rem", marginBottom:"2rem" }}>
+        <div style={{ fontFamily:"var(--font-display)", fontSize:"clamp(3rem,8vw,5.5rem)", lineHeight:.9, letterSpacing:".02em" }}>FRIENDS</div>
+        <p style={{ marginTop:".8rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:"1rem" }}>Connect with other students by their email address.</p>
+      </div>
+
+      {/* Search */}
+      <div className="card" style={{ marginBottom:"1.2rem" }}>
+        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>ADD FRIEND</div>
+        <div style={{ display:"flex", gap:".6rem" }}>
+          <input value={searchEmail} onChange={e=>setSearchEmail(e.target.value)} placeholder="friend@school.edu" type="email" style={{ flex:1 }} onKeyDown={e=>e.key==="Enter"&&searchUser()} maxLength={120}/>
+          <button className="btn btn-orange" onClick={searchUser} disabled={searching}>{searching ? <Spinner size={14}/> : "Find →"}</button>
+        </div>
+        {found && (
+          <div style={{ marginTop:".8rem", display:"flex", justifyContent:"space-between", alignItems:"center", padding:".75rem .9rem", background:"var(--paper2)", border:"1.5px solid var(--paper3)" }}>
+            <button onClick={() => setViewProfile(found)} style={{ display:"flex", alignItems:"center", gap:".6rem", background:"none", border:"none", cursor:"pointer", padding:0, textAlign:"left" }}>
+              <div style={{ width:36, height:36, borderRadius:"50%", overflow:"hidden", background:"var(--orange-lt)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                {found.avatar_url ? <img src={found.avatar_url} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }}/> : <span style={{ fontFamily:"var(--font-display)", fontSize:".9rem", color:"var(--orange)" }}>{initials(found.name)}</span>}
+              </div>
+              <div>
+                <div style={{ fontWeight:700, fontSize:".9rem" }}>{found.name}</div>
+                <div style={{ fontSize:".72rem", color:"var(--muted)" }}>{found.email}</div>
+              </div>
+            </button>
+            <button className="btn btn-sm btn-orange" onClick={sendRequest}>Send Request →</button>
+          </div>
+        )}
+      </div>
+
+      {/* Incoming requests */}
+      {requests.length > 0 && (
+        <div className="card" style={{ marginBottom:"1.2rem" }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>
+            REQUESTS
+            <span style={{ background:"var(--red)", color:"#fff", borderRadius:"999px", fontSize:".62rem", padding:".1rem .42rem", marginLeft:".5rem", verticalAlign:"middle", fontFamily:"var(--font-body)", fontWeight:700 }}>{requests.length}</span>
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:".6rem" }}>
+            {requests.map((r, i) => (
+              <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:".65rem .8rem", background:"var(--paper2)", border:"1.5px solid var(--paper3)" }}>
+                <div>
+                  <div style={{ fontWeight:700, fontSize:".88rem" }}>{r.fromName}</div>
+                  <div style={{ fontSize:".72rem", color:"var(--muted)" }}>{r.fromEmail}</div>
+                </div>
+                <div style={{ display:"flex", gap:".4rem" }}>
+                  <button className="btn btn-sm btn-orange" onClick={() => acceptRequest(r)}>Accept</button>
+                  <button className="btn btn-sm btn-danger" onClick={() => declineRequest(r)}>Decline</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Friends list */}
+      <div className="card">
+        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em", marginBottom:".85rem", borderBottom:"1.5px solid var(--paper3)", paddingBottom:".5rem" }}>MY FRIENDS ({friends.length})</div>
+        {friends.length === 0
+          ? <p style={{ color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:".85rem" }}>No friends yet. Search by email above to connect.</p>
+          : (
+            <div style={{ display:"flex", flexDirection:"column", gap:".5rem" }}>
+              {friends.map((f, i) => (
+                <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:".65rem .8rem", background:"var(--paper2)", border:"1.5px solid var(--paper3)" }}>
+                  <button onClick={() => setViewProfile(f)} style={{ display:"flex", alignItems:"center", gap:".6rem", background:"none", border:"none", cursor:"pointer", padding:0, textAlign:"left" }}>
+                    <Avatar name={f.name} size={32}/>
+                    <div>
+                      <div style={{ fontWeight:700, fontSize:".88rem" }}>{f.name}</div>
+                      <div style={{ fontSize:".72rem", color:"var(--muted)" }}>{f.email}</div>
+                    </div>
+                  </button>
+                  <button className="btn btn-sm btn-danger" onClick={() => removeFriend(f.id)}>Remove</button>
+                </div>
+              ))}
+            </div>
+          )}
+      </div>
+
+      {viewProfile && <UserProfileModal u={viewProfile} onClose={() => setViewProfile(null)}/>}
     </div>
   );
 }
@@ -548,13 +1017,13 @@ function GroupCard({ g, onJoin, onApply, userId }) {
           </div>
         </div>
       </div>
-      {profileOpen && profileUser && <ProfileModal u={profileUser} onClose={() => { setProfileOpen(false); setProfileUser(null); }}/>}
+      {profileOpen && profileUser && <UserProfileModal u={profileUser} onClose={() => { setProfileOpen(false); setProfileUser(null); }}/>}
     </>
   );
 }
 
 function CreateModal({ onClose, onCreate, userId, userName }) {
-  const [f, setF]           = useState({ name:"", category:"", sub:"", location:"", remote:false, desc:"", tags:"", max:8, group_type:"open", postal_code:"", min_gpa:"", min_sat:"", min_act:"", req_text:"" });
+  const [f, setF]           = useState({ name:"", category:"", sub:"", location:"", remote:false, desc:"", tags:"", max:8, group_type:"open", min_gpa:"", min_sat:"", min_act:"", req_text:"" });
   const [errors, setErrors] = useState({});
   const s = (k, v) => { setF(p=>({...p,[k]:v})); setErrors(p=>({...p,[k]:""})); };
 
@@ -573,28 +1042,27 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
   function submit() {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
-    const reqs = f.group_type === "invite_only" ? {
+    const reqs = {
       ...(f.min_gpa  ? { min_gpa:  parseFloat(f.min_gpa)  } : {}),
       ...(f.min_sat  ? { min_sat:  parseInt(f.min_sat)    } : {}),
       ...(f.min_act  ? { min_act:  parseInt(f.min_act)    } : {}),
       ...(f.req_text ? { req_text: sanitize(f.req_text, 200) } : {}),
-    } : {};
+    };
     onCreate({
       id: "g" + Date.now(),
-      name:       sanitize(f.name, 80),
-      category:   f.category,
-      sub:        sanitize(f.sub, 60) || f.category,
-      location:   f.remote ? "Remote" : sanitize(f.location, 60) || "Remote",
-      remote:     f.remote,
-      members:    [userId],
-      max:        Math.min(50, Math.max(2, Number(f.max) || 8)),
-      desc:       sanitize(f.desc, 500),
-      tags:       f.tags.split(",").map(t => sanitize(t.trim(), 30)).filter(Boolean).slice(0, 8),
-      byId:       userId,
-      byName:     userName,
-      ts:         Date.now(),
-      group_type: f.group_type,
-      postal_code: f.remote ? "" : sanitize(f.postal_code, 10),
+      name:         sanitize(f.name, 80),
+      category:     f.category,
+      sub:          sanitize(f.sub, 60) || f.category,
+      location:     f.remote ? "Remote" : sanitize(f.location, 60) || "Remote",
+      remote:       f.remote,
+      members:      [userId],
+      max:          Math.min(50, Math.max(2, Number(f.max) || 8)),
+      desc:         sanitize(f.desc, 500),
+      tags:         f.tags.split(",").map(t => sanitize(t.trim(), 30)).filter(Boolean).slice(0, 8),
+      byId:         userId,
+      byName:       userName,
+      ts:           Date.now(),
+      group_type:   f.group_type,
       requirements: reqs,
       applications: [],
     });
@@ -626,12 +1094,7 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
             <input type="checkbox" id="rm" checked={f.remote} onChange={e=>s("remote",e.target.checked)} style={{ width:"auto", accentColor:"var(--orange)" }}/>
             <label htmlFor="rm" style={{ margin:0, textTransform:"none", fontSize:".85rem", letterSpacing:0, color:"var(--ink)" }}>This group meets remotely</label>
           </div>
-          {!f.remote && (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:".7rem" }}>
-              <div><label>Location</label><input value={f.location} onChange={e=>s("location",e.target.value)} placeholder="City, State" maxLength={60}/></div>
-              <div><label>Postal Code (US)</label><input value={f.postal_code} onChange={e=>s("postal_code",e.target.value)} placeholder="e.g. 92037" maxLength={10}/></div>
-            </div>
-          )}
+          {!f.remote && <div><label>Location</label><input value={f.location} onChange={e=>s("location",e.target.value)} placeholder="City, State" maxLength={60}/></div>}
           <div>
             <label>Description *</label>
             <textarea rows={3} value={f.desc} onChange={e=>s("desc",e.target.value)} placeholder="What does your group do?" className={errors.desc?"error":""} maxLength={500}/>
@@ -649,9 +1112,8 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
               </select>
             </div>
           </div>
-          {f.group_type === "invite_only" && (
-            <div style={{ border:"1.5px solid var(--paper3)", borderRadius:4, padding:".85rem", display:"flex", flexDirection:"column", gap:".7rem" }}>
-              <div style={{ fontSize:".72rem", fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)" }}>Requirements to Apply (all optional)</div>
+          <div style={{ border:"1.5px solid var(--paper3)", borderRadius:4, padding:".85rem", display:"flex", flexDirection:"column", gap:".7rem" }}>
+              <div style={{ fontSize:".72rem", fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", color:"var(--muted)" }}>Requirements to Join (all optional)</div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:".6rem" }}>
                 <div><label>Min GPA</label><input type="number" min={0} max={4} step={0.01} value={f.min_gpa} onChange={e=>s("min_gpa",e.target.value)} placeholder="e.g. 3.5"/></div>
                 <div><label>Min SAT</label><input type="number" min={400} max={1600} value={f.min_sat} onChange={e=>s("min_sat",e.target.value)} placeholder="e.g. 1400"/></div>
@@ -662,8 +1124,7 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
                 <textarea rows={2} value={f.req_text} onChange={e=>s("req_text",e.target.value)} placeholder="e.g. Must be available weekends…" maxLength={200} className={errors.req_text?"error":""}/>
                 {errors.req_text && <div className="field-error">{errors.req_text}</div>}
               </div>
-            </div>
-          )}
+          </div>
         </div>
         <div style={{ display:"flex", gap:".6rem", marginTop:"1.4rem", justifyContent:"flex-end" }}>
           <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
@@ -682,48 +1143,34 @@ function LobbyPage({ groups, setGroups, initCat }) {
   const [fmt, setFmt]           = useState("all");
   const [modal, setModal]       = useState(false);
   const [dist, setDist]         = useState("any");
-  const [userPostal, setUserPostal] = useState(() => { try { return sessionStorage.getItem("ec:postal") || ""; } catch { return ""; } });
   const [userCoords, setUserCoords] = useState(null);
-  const [postalPrompt, setPostalPrompt] = useState(false);
+  const [geoLoading, setGeoLoading] = useState(false);
   const [passDistIds, setPassDistIds]   = useState(null); // null = not yet computed
   const [applyGroup, setApplyGroup]     = useState(null);
-  const coordCache = useRef({});
-
-  // Resolve user coords when postal changes
-  useEffect(() => {
-    if (!userPostal) { setUserCoords(null); return; }
-    if (coordCache.current[userPostal]) { setUserCoords(coordCache.current[userPostal]); return; }
-    postalToLatLng(userPostal).then(c => {
-      if (c) { coordCache.current[userPostal] = c; setUserCoords(c); }
-      else { toast("Couldn't find that ZIP code.", "warning"); setUserCoords(null); }
-    });
-  }, [userPostal]);
 
   // Compute passing group IDs when dist / userCoords / groups change
   useEffect(() => {
     if (dist === "any") { setPassDistIds(null); return; }
     if (!userCoords) { setPassDistIds(null); return; }
     const miles = dist === "25" ? 25 : dist === "50" ? 50 : 100;
-    const resolveCoordsAndFilter = async () => {
-      const passing = new Set();
-      await Promise.all(groups.map(async g => {
-        if (g.remote || !g.postal_code) { passing.add(g.id); return; }
-        let gc = coordCache.current[g.postal_code];
-        if (!gc) {
-          gc = await postalToLatLng(g.postal_code);
-          if (gc) coordCache.current[g.postal_code] = gc;
-        }
-        if (!gc) { passing.add(g.id); return; } // can't determine — include by default
-        if (haversine(userCoords.lat, userCoords.lng, gc.lat, gc.lng) <= miles) passing.add(g.id);
-      }));
-      setPassDistIds(passing);
-    };
-    resolveCoordsAndFilter();
+    const passing = new Set();
+    groups.forEach(g => {
+      if (g.remote || (!g.lat && !g.lng)) { passing.add(g.id); return; }
+      if (haversine(userCoords.lat, userCoords.lng, g.lat, g.lng) <= miles) passing.add(g.id);
+    });
+    setPassDistIds(passing);
   }, [dist, userCoords, groups]);
 
   function handleDistChange(val) {
-    if (val !== "any" && !userPostal) { setPostalPrompt(true); }
     setDist(val);
+    if (val !== "any" && !userCoords) {
+      if (!navigator.geolocation) { toast("Geolocation not supported by your browser.", "warning"); setDist("any"); return; }
+      setGeoLoading(true);
+      navigator.geolocation.getCurrentPosition(
+        pos => { setUserCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude }); setGeoLoading(false); },
+        () => { toast("Location access denied. Distance filter requires location.", "warning"); setGeoLoading(false); setDist("any"); }
+      );
+    }
   }
 
   function join(id) {
@@ -775,10 +1222,14 @@ function LobbyPage({ groups, setGroups, initCat }) {
           <option value="50">Within 50 miles</option>
           <option value="100">Within 100 miles</option>
         </select>
-        {userPostal && dist !== "any" && (
+        {userCoords && dist !== "any" && (
           <span style={{ fontSize:".75rem", color:"var(--muted)", fontStyle:"italic", display:"flex", alignItems:"center", gap:".3rem" }}>
-            near {userPostal}
-            <button onClick={() => setPostalPrompt(true)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:".75rem", color:"var(--blue)", padding:0, fontFamily:"var(--font-body)" }}>change</button>
+            📍 Using your location
+          </span>
+        )}
+        {geoLoading && (
+          <span style={{ fontSize:".75rem", color:"var(--muted)", fontStyle:"italic", display:"flex", alignItems:"center", gap:".3rem" }}>
+            <Spinner/> Getting location…
           </span>
         )}
       </div>
@@ -805,7 +1256,6 @@ function LobbyPage({ groups, setGroups, initCat }) {
         </div>
       )}
       {modal && <CreateModal onClose={() => setModal(false)} userId={user.id} userName={user.name} onCreate={g => { setGroups(p=>[g,...p]); setModal(false); toast("Group created!", "success"); }}/>}
-      {postalPrompt && <PostalPromptModal onClose={() => setPostalPrompt(false)} onSave={p => { setUserPostal(p); try { sessionStorage.setItem("ec:postal", p); } catch {} }}/>}
       {applyGroup && <ApplyModal g={applyGroup} onClose={() => setApplyGroup(null)} onSubmit={(data) => apply(applyGroup.id, data)}/>}
     </div>
   );
@@ -1238,7 +1688,7 @@ function MyGroupsPage({ groups, setGroups, goChat }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // CHAT
 // ═══════════════════════════════════════════════════════════════════════════
-function ChatPage({ groups, jumpGroup }) {
+function ChatPage({ groups, setGroups, jumpGroup }) {
   const { user } = useAuth();
   const toast    = useToast();
   const [msgs, setMsgs]       = useState(null);
@@ -1246,7 +1696,12 @@ function ChatPage({ groups, jumpGroup }) {
   const [input, setInput]     = useState("");
   const [showDM, setShowDM]   = useState(false);
   const [dmTarget, setDmTarget] = useState("");
+  const [callModal, setCallModal] = useState(null);
+  const [showInfo, setShowInfo] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [profileUser, setProfileUser] = useState(null);
   const endRef = useRef(null);
+  const fileRef = useRef(null);
 
   useEffect(() => { DB.load("msgs", null).then(d => setMsgs(d || SEED_MESSAGES)); }, []);
   useEffect(() => { if (msgs) DB.save("msgs", msgs); }, [msgs]);
@@ -1300,6 +1755,25 @@ function ChatPage({ groups, jumpGroup }) {
     setShowDM(false); setDmTarget("");
   }
 
+  async function uploadFile(file) {
+    if (!active) return;
+    if (file.size > 20 * 1024 * 1024) { toast("File must be under 20MB.", "warning"); return; }
+    setUploading(true);
+    try {
+      const ext  = file.name.split(".").pop();
+      const path = `${user.id}/${Date.now()}.${ext}`;
+      const { error } = await supabase.storage.from("chat-media").upload(path, file);
+      if (error) throw error;
+      const { data: { publicUrl } } = supabase.storage.from("chat-media").getPublicUrl(path);
+      const msg = { id:"m"+Date.now(), senderId:user.id, senderName:user.name, text:"", media:{ url:publicUrl, type:file.type, name:file.name }, ts:Date.now() };
+      setMsgs(p => ({ ...p, [active.id]: [...(p[active.id]||[]), msg] }));
+    } catch(e) {
+      toast("Upload failed: " + e.message, "error");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   const threadMsgs  = active && msgs ? (msgs[active.id]||[]) : [];
   const activeGroup = active?.type==="group" ? mine.find(g=>g.id===active.id) : null;
 
@@ -1338,7 +1812,7 @@ function ChatPage({ groups, jumpGroup }) {
         ))}
       </div>
 
-      <div className="chat-main">
+      <div className="chat-main" style={{ position:"relative" }}>
         {!active ? (
           <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:"1rem" }}>
             <div style={{ fontFamily:"var(--font-display)", fontSize:"2.5rem", letterSpacing:".05em", color:"var(--paper3)" }}>SELECT A CHAT</div>
@@ -1353,7 +1827,12 @@ function ChatPage({ groups, jumpGroup }) {
                 {activeGroup && <div style={{ fontSize:".7rem", color:"var(--muted)", fontStyle:"italic" }}>{activeGroup.members.length} members · {activeGroup.sub}</div>}
                 {active.type==="dm" && <div style={{ fontSize:".68rem", color:"var(--green)", fontWeight:700, letterSpacing:".05em", textTransform:"uppercase" }}>● Direct Message</div>}
               </div>
-              {activeGroup && <div style={{ marginLeft:"auto", display:"flex", gap:".35rem", flexWrap:"wrap" }}>{activeGroup.tags.slice(0,2).map(t=><span key={t} className="tag" style={{fontSize:".58rem"}}>{t}</span>)}</div>}
+              <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:".35rem", flexWrap:"wrap" }}>
+                {activeGroup && activeGroup.tags.slice(0,2).map(t=><span key={t} className="tag" style={{fontSize:".58rem"}}>{t}</span>)}
+                <button className="btn btn-ghost btn-sm" onClick={() => setCallModal({ type:"video", roomId:active.id, title:active.name })} title="Video call">📹</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setCallModal({ type:"audio", roomId:active.id, title:active.name })} title="Voice call">📞</button>
+                {activeGroup && <button className="btn btn-ghost btn-sm" onClick={() => setShowInfo(v=>!v)} title="Group info">⋯</button>}
+              </div>
             </div>
             <div className="chat-messages">
               {threadMsgs.length===0 && <div style={{ textAlign:"center", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", margin:"2rem 0" }}>No messages yet — say something! 👋</div>}
@@ -1362,11 +1841,20 @@ function ChatPage({ groups, jumpGroup }) {
                 const showSender = !self && (i===0 || threadMsgs[i-1]?.senderId !== m.senderId);
                 return (
                   <div key={m.id} style={{ display:"flex", flexDirection:"column", alignItems:self?"flex-end":"flex-start", gap:".12rem", animation:"msgIn .2s ease" }}>
-                    {showSender && <div style={{ fontSize:".63rem", fontWeight:700, color:avatarColor(m.senderName), marginLeft:"2.6rem", letterSpacing:".04em" }}>{m.senderName}</div>}
+                    {showSender && <div onClick={() => setProfileUser({ id:m.senderId })} style={{ fontSize:".63rem", fontWeight:700, color:avatarColor(m.senderName), marginLeft:"2.6rem", letterSpacing:".04em", cursor:"pointer" }}>{m.senderName}</div>}
                     <div style={{ display:"flex", alignItems:"flex-end", gap:".45rem", flexDirection:self?"row-reverse":"row" }}>
-                      {!self && (i===0 || threadMsgs[i-1]?.senderId!==m.senderId) ? <Avatar name={m.senderName} size={24}/> : <div style={{ width:24 }}/>}
+                      {!self && (i===0 || threadMsgs[i-1]?.senderId!==m.senderId) ? <div onClick={() => setProfileUser({ id:m.senderId })} style={{ cursor:"pointer" }}><Avatar name={m.senderName} size={24}/></div> : <div style={{ width:24 }}/>}
                       <div className={`msg-bubble ${self?"msg-self":"msg-other"}`}>
-                        {m.text}
+                        {m.media ? (
+                          m.media.type?.startsWith("image/") ? (
+                            <img src={m.media.url} alt={m.media.name} style={{ maxWidth:220, maxHeight:200, borderRadius:4, display:"block", marginBottom:".2rem" }}/>
+                          ) : (
+                            <a href={m.media.url} download={m.media.name} style={{ display:"flex", alignItems:"center", gap:".4rem", color:"inherit" }}>
+                              <span>{fileIcon(m.media.type)}</span>
+                              <span style={{ textDecoration:"underline", fontSize:".8rem" }}>{m.media.name}</span>
+                            </a>
+                          )
+                        ) : m.text}
                         <div style={{ fontSize:".6rem", opacity:.55, marginTop:".2rem", textAlign:self?"right":"left" }}>{ftime(m.ts)}</div>
                       </div>
                     </div>
@@ -1378,6 +1866,8 @@ function ChatPage({ groups, jumpGroup }) {
             <div className="chat-input-row">
               {canSend(active) ? (
                 <>
+                  <input type="file" ref={fileRef} style={{ display:"none" }} onChange={e => { if(e.target.files[0]) uploadFile(e.target.files[0]); e.target.value=""; }}/>
+                  <button className="btn btn-ghost btn-sm" onClick={() => fileRef.current?.click()} disabled={uploading} title="Attach file" style={{ flexShrink:0 }}>{uploading ? <Spinner/> : "📎"}</button>
                   <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send()}}} placeholder={`Message ${active.name}…`} rows={1} style={{ resize:"none", maxHeight:110, overflowY:"auto", flex:1 }} maxLength={2000}/>
                   <button className="btn" onClick={send} disabled={!input.trim()}>Send</button>
                 </>
@@ -1385,6 +1875,7 @@ function ChatPage({ groups, jumpGroup }) {
                 <div style={{ flex:1, fontSize:".78rem", color:"var(--muted)", fontStyle:"italic", padding:".4rem 0" }}>Join this group to send messages.</div>
               )}
             </div>
+            {showInfo && activeGroup && <GroupInfoPanel group={activeGroup} groups={groups} setGroups={setGroups} msgs={msgs} userId={user.id} onClose={() => setShowInfo(false)}/>}
           </>
         )}
       </div>
@@ -1405,6 +1896,8 @@ function ChatPage({ groups, jumpGroup }) {
           </div>
         </div>
       )}
+      {callModal && <CallModal title={callModal.title} roomId={callModal.roomId} type={callModal.type} onClose={() => setCallModal(null)}/>}
+      {profileUser && <UserProfileModal userId={profileUser.id} onClose={() => setProfileUser(null)}/>}
     </div>
   );
 }
@@ -1928,6 +2421,7 @@ function AppShell() {
     { id:"advisor",  label:"Advisor",   icon:"📋" },
     { id:"mygroups", label:"My Groups", icon:"👥" },
     { id:"messages", label:"Messages",  icon:"💬" },
+    { id:"friends",  label:"Friends",   icon:"🤝" },
     { id:"aichat",   label:"AI Chat",   icon:"🤖" },
     { id:"tools",    label:"Dev Tools", icon:"🛠"  },
     { id:"profile",  label:"Profile",   icon:"👤" },
@@ -1961,7 +2455,8 @@ function AppShell() {
         {page==="lobby"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups} initCat={lobbyFilter}/></div>}
         {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={(cats) => { setLobbyFilter(cats?.[0] || "all"); setPage("lobby"); }} goProfile={()=>setPage("profile")}/></div>}
         {page==="mygroups" && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><MyGroupsPage groups={groups} setGroups={setGroups} goChat={goChat}/></div>}
-        {page==="messages" && <ChatPage groups={groups} jumpGroup={jumpGroup}/>}
+        {page==="messages" && <ChatPage groups={groups} setGroups={setGroups} jumpGroup={jumpGroup}/>}
+        {page==="friends"  && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><FriendsPage/></div>}
         {page==="aichat"   && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><AIChatPage/></div>}
         {page==="tools"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ToolsPage/></div>}
         {page==="profile"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ProfilePage/></div>}
