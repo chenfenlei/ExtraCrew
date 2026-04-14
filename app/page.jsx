@@ -3,25 +3,10 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { sanitize, Validators, passesContentPolicy, ClientRateLimit } from "@/lib/security";
 import { callClaude } from "@/lib/api";
-import { CATS, CAT_TAG, SEED_GROUPS, SEED_MESSAGES, MOCK_USERS, AI_TOOLS } from "@/lib/data";
+import { CATS, CAT_TAG, SEED_GROUPS, MOCK_USERS, AI_TOOLS } from "@/lib/data";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-
-// ═══════════════════════════════════════════════════════════════════════════
-// STORAGE HELPERS  (swap .set/.get calls for Supabase client in production)
-// ═══════════════════════════════════════════════════════════════════════════
-const DB = {
-  load: async (key, fallback) => {
-    try {
-      const raw = localStorage.getItem("ec:" + key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch { return fallback; }
-  },
-  save: async (key, val) => {
-    try { localStorage.setItem("ec:" + key, JSON.stringify(val)); } catch {}
-  },
-};
 
 // ─── Distance helpers ─────────────────────────────────────────────────────
 function haversine(lat1, lon1, lat2, lon2) {
@@ -44,6 +29,10 @@ function fileIcon(type) {
 // ═══════════════════════════════════════════════════════════════════════════
 const AuthCtx = createContext(null);
 const useAuth = () => useContext(AuthCtx);
+
+// ─── Online presence context ──────────────────────────────────────────────
+const OnlineCtx = createContext(new Set());
+const useOnline = () => useContext(OnlineCtx);
 
 function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -500,13 +489,14 @@ function GroupInfoPanel({ group, groups, setGroups, msgs, userId, onClose }) {
     try { localStorage.setItem(`ec:nick_${group.id}_${userId}`, clean); } catch {}
     toast("Nickname updated!", "success");
   }
-  function saveNotice() {
+  async function saveNotice() {
     const clean = sanitize(notice, 300);
     setGroups(gs => gs.map(g => g.id === group.id ? { ...g, notice: clean } : g));
     setEditNotice(false);
+    await supabase.from("groups").update({ notice: clean }).eq("id", group.id);
     toast("Notice updated!", "success");
   }
-  function saveSettings() {
+  async function saveSettings() {
     if (newReqText && !Validators.noScript(newReqText)) { toast("Invalid characters.", "error"); return; }
     const reqs = {
       ...(newMinGpa  ? { min_gpa:  parseFloat(newMinGpa)  } : {}),
@@ -516,6 +506,7 @@ function GroupInfoPanel({ group, groups, setGroups, msgs, userId, onClose }) {
     };
     setGroups(gs => gs.map(g => g.id === group.id ? { ...g, group_type: newType, requirements: reqs } : g));
     setEditSettings(false);
+    await supabase.from("groups").update({ group_type: newType, requirements: reqs }).eq("id", group.id);
     toast("Group settings updated!", "success");
   }
   async function uploadAvatar(file) {
@@ -531,8 +522,10 @@ function GroupInfoPanel({ group, groups, setGroups, msgs, userId, onClose }) {
     toast("Group photo updated!", "success");
     setUploading(false);
   }
-  function leaveGroup() {
-    setGroups(gs => gs.map(g => g.id === group.id ? { ...g, members: g.members.filter(m => m !== userId) } : g));
+  async function leaveGroup() {
+    const newMembers = currentGroup.members.filter(m => m !== userId);
+    setGroups(gs => gs.map(g => g.id === group.id ? { ...g, members: newMembers } : g));
+    await supabase.from("groups").update({ members: newMembers }).eq("id", group.id);
     toast("Left the group.", "success");
     onClose();
   }
@@ -1023,8 +1016,10 @@ function GroupCard({ g, onJoin, onApply, userId }) {
 }
 
 function CreateModal({ onClose, onCreate, userId, userName }) {
+  const toast = useToast();
   const [f, setF]           = useState({ name:"", category:"", sub:"", location:"", remote:false, desc:"", tags:"", max:8, group_type:"open", min_gpa:"", min_sat:"", min_act:"", req_text:"" });
   const [errors, setErrors] = useState({});
+  const [submitting, setSubmitting] = useState(false);
   const s = (k, v) => { setF(p=>({...p,[k]:v})); setErrors(p=>({...p,[k]:""})); };
 
   function validate() {
@@ -1039,7 +1034,7 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
     return e;
   }
 
-  function submit() {
+  async function submit() {
     const e = validate();
     if (Object.keys(e).length) { setErrors(e); return; }
     const reqs = {
@@ -1048,8 +1043,7 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
       ...(f.min_act  ? { min_act:  parseInt(f.min_act)    } : {}),
       ...(f.req_text ? { req_text: sanitize(f.req_text, 200) } : {}),
     };
-    onCreate({
-      id: "g" + Date.now(),
+    const group = {
       name:         sanitize(f.name, 80),
       category:     f.category,
       sub:          sanitize(f.sub, 60) || f.category,
@@ -1061,11 +1055,15 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
       tags:         f.tags.split(",").map(t => sanitize(t.trim(), 30)).filter(Boolean).slice(0, 8),
       byId:         userId,
       byName:       userName,
-      ts:           Date.now(),
       group_type:   f.group_type,
       requirements: reqs,
       applications: [],
-    });
+    };
+    setSubmitting(true);
+    const { data, error } = await supabase.from("groups").insert([group]).select().single();
+    setSubmitting(false);
+    if (error) { toast("Failed to create group: " + error.message, "error"); return; }
+    onCreate(data || group);
     onClose();
   }
 
@@ -1127,8 +1125,8 @@ function CreateModal({ onClose, onCreate, userId, userName }) {
           </div>
         </div>
         <div style={{ display:"flex", gap:".6rem", marginTop:"1.4rem", justifyContent:"flex-end" }}>
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn-orange" onClick={submit}>Create Group</button>
+          <button className="btn btn-ghost" onClick={onClose} disabled={submitting}>Cancel</button>
+          <button className="btn btn-orange" onClick={submit} disabled={submitting}>{submitting ? "Creating…" : "Create Group"}</button>
         </div>
       </div>
     </div>
@@ -1173,20 +1171,26 @@ function LobbyPage({ groups, setGroups, initCat }) {
     }
   }
 
-  function join(id) {
+  async function join(id) {
     const g = groups.find(x => x.id === id);
     if (!g || g.members.includes(user.id)) return;
     if (g.members.length >= g.max) { toast("This group is full.", "warning"); return; }
-    setGroups(gs => gs.map(g => g.id===id ? {...g, members:[...g.members, user.id]} : g));
-    toast(`Joined "${g.name}"!`, "success");
+    const newMembers = [...g.members, user.id];
+    setGroups(gs => gs.map(x => x.id===id ? {...x, members:newMembers} : x));
+    const { error } = await supabase.from("groups").update({ members: newMembers }).eq("id", id);
+    if (error) {
+      setGroups(gs => gs.map(x => x.id===id ? {...x, members:x.members.filter(m=>m!==user.id)} : x));
+      toast("Failed to join: " + error.message, "error");
+    } else {
+      toast(`Joined "${g.name}"!`, "success");
+    }
   }
 
-  function apply(id, appData) {
-    setGroups(gs => gs.map(g => {
-      if (g.id !== id) return g;
-      const apps = g.applications || [];
-      return { ...g, applications: [...apps, { userId: user.id, name: user.name, ts: Date.now(), status: "pending", ...appData }] };
-    }));
+  async function apply(id, appData) {
+    const g = groups.find(x => x.id === id);
+    const newApps = [...(g?.applications || []), { userId: user.id, name: user.name, ts: Date.now(), status: "pending", ...appData }];
+    setGroups(gs => gs.map(x => x.id===id ? {...x, applications:newApps} : x));
+    await supabase.from("groups").update({ applications: newApps }).eq("id", id);
     toast("Application submitted!", "success");
   }
 
@@ -1598,33 +1602,34 @@ function MyGroupsPage({ groups, setGroups, goChat }) {
   const [appsModal, setAppsModal] = useState(null); // group object
   const mine     = groups.filter(g => g.members.includes(user.id));
 
-  function leave(id) {
+  async function leave(id) {
     const g = groups.find(x => x.id === id);
     if (g?.byId === user.id) { toast("You own this group — delete it instead.", "warning"); return; }
-    setGroups(gs => gs.map(g => g.id===id ? {...g, members:g.members.filter(m=>m!==user.id)} : g));
+    const newMembers = g.members.filter(m => m !== user.id);
+    setGroups(gs => gs.map(x => x.id===id ? {...x, members:newMembers} : x));
+    await supabase.from("groups").update({ members: newMembers }).eq("id", id);
     toast("Left the group.", "success");
   }
-  function deleteGroup(id) {
+  async function deleteGroup(id) {
     setGroups(gs => gs.filter(g => g.id !== id));
+    await supabase.from("groups").delete().eq("id", id);
     toast("Group deleted.", "success");
   }
-  function approveApp(groupId, appUserId) {
-    setGroups(gs => gs.map(g => {
-      if (g.id !== groupId) return g;
-      const apps = (g.applications || []).map(a => a.userId === appUserId ? { ...a, status: "approved" } : a);
-      const newMembers = g.members.includes(appUserId) ? g.members : [...g.members, appUserId];
-      return { ...g, applications: apps, members: newMembers };
-    }));
-    setAppsModal(prev => prev ? { ...prev, applications: (prev.applications || []).map(a => a.userId === appUserId ? { ...a, status: "approved" } : a), members: [...(prev.members.includes(appUserId) ? prev.members : [...prev.members, appUserId])] } : null);
+  async function approveApp(groupId, appUserId) {
+    const g = groups.find(x => x.id === groupId);
+    const newApps    = (g?.applications || []).map(a => a.userId === appUserId ? { ...a, status: "approved" } : a);
+    const newMembers = g.members.includes(appUserId) ? g.members : [...g.members, appUserId];
+    setGroups(gs => gs.map(x => x.id===groupId ? {...x, applications:newApps, members:newMembers} : x));
+    setAppsModal(prev => prev ? { ...prev, applications: newApps, members: newMembers } : null);
+    await supabase.from("groups").update({ applications: newApps, members: newMembers }).eq("id", groupId);
     toast("Application approved.", "success");
   }
-  function declineApp(groupId, appUserId) {
-    setGroups(gs => gs.map(g => {
-      if (g.id !== groupId) return g;
-      const apps = (g.applications || []).map(a => a.userId === appUserId ? { ...a, status: "declined" } : a);
-      return { ...g, applications: apps };
-    }));
-    setAppsModal(prev => prev ? { ...prev, applications: (prev.applications || []).map(a => a.userId === appUserId ? { ...a, status: "declined" } : a) } : null);
+  async function declineApp(groupId, appUserId) {
+    const g = groups.find(x => x.id === groupId);
+    const newApps = (g?.applications || []).map(a => a.userId === appUserId ? { ...a, status: "declined" } : a);
+    setGroups(gs => gs.map(x => x.id===groupId ? {...x, applications:newApps} : x));
+    setAppsModal(prev => prev ? { ...prev, applications: newApps } : null);
+    await supabase.from("groups").update({ applications: newApps }).eq("id", groupId);
     toast("Application declined.", "success");
   }
 
@@ -1688,46 +1693,140 @@ function MyGroupsPage({ groups, setGroups, goChat }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // CHAT
 // ═══════════════════════════════════════════════════════════════════════════
-function ChatPage({ groups, setGroups, jumpGroup }) {
-  const { user } = useAuth();
-  const toast    = useToast();
-  const [msgs, setMsgs]       = useState(null);
-  const [active, setActive]   = useState(null);
-  const [input, setInput]     = useState("");
-  const [showDM, setShowDM]   = useState(false);
-  const [dmTarget, setDmTarget] = useState("");
-  const [callModal, setCallModal] = useState(null);
-  const [showInfo, setShowInfo] = useState(false);
-  const [uploading, setUploading] = useState(false);
+function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
+  const { user }   = useAuth();
+  const toast      = useToast();
+  const onlineUsers = useOnline();
+
+  // ── per-thread message state ──────────────────────────────────────────
+  const [threadMsgs, setThreadMsgs]   = useState([]);
+  const [msgsLoading, setMsgsLoading] = useState(false);
+  const [previews, setPreviews]       = useState({});     // { threadId: { text, ts } }
+  const [unreadMap, setUnreadMap]     = useState({});     // { threadId: count }
+  const [lastRead, setLastRead]       = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ec:lastRead") || "{}"); } catch { return {}; }
+  });
+  const [dmThreadList, setDmThreadList] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(`ec:dms_${user.id}`) || "[]"); } catch { return []; }
+  }); // [{ id, name, otherId }]
+
+  const [active, setActive]           = useState(null);
+  const [input, setInput]             = useState("");
+  const [showDM, setShowDM]           = useState(false);
+  const [dmTarget, setDmTarget]       = useState("");
+  const [callModal, setCallModal]     = useState(null);
+  const [showInfo, setShowInfo]       = useState(false);
+  const [uploading, setUploading]     = useState(false);
   const [profileUser, setProfileUser] = useState(null);
-  const endRef = useRef(null);
-  const fileRef = useRef(null);
 
-  useEffect(() => { DB.load("msgs", null).then(d => setMsgs(d || SEED_MESSAGES)); }, []);
-  useEffect(() => { if (msgs) DB.save("msgs", msgs); }, [msgs]);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior:"smooth" }); }, [msgs, active]);
+  const endRef      = useRef(null);
+  const fileRef     = useRef(null);
+  const activeRef   = useRef(null);   // stale-closure-safe ref to active
+  const threadChRef = useRef(null);   // current thread channel
+  const globalChRef = useRef(null);   // global unread-tracking channel
+
+  const mine = groups.filter(g => g.members.includes(user.id));
+
+  // keep activeRef in sync
+  useEffect(() => { activeRef.current = active; }, [active]);
+
+  // auto-scroll
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior:"smooth" }); }, [threadMsgs]);
+
+  // report total unread to parent nav badge
   useEffect(() => {
-    if (jumpGroup && msgs !== null) {
+    const total = Object.values(unreadMap).reduce((s, n) => s + n, 0);
+    onUnreadChange?.(total);
+  }, [unreadMap]);
+
+  // jump to group from MyGroups → Go to Chat
+  useEffect(() => {
+    if (jumpGroup) {
       const g = groups.find(x => x.id === jumpGroup);
-      if (g) setActive({ id: jumpGroup, type:"group", name:g.name });
+      if (g) openThread({ id: jumpGroup, type:"group", name:g.name });
     }
-  }, [jumpGroup, msgs]);
+  }, [jumpGroup]);
 
-  const mine     = groups.filter(g => g.members.includes(user.id));
-  const dmKeys   = msgs ? Object.keys(msgs).filter(k => k.startsWith("dm_") && k.includes(user.id)) : [];
+  // Load sidebar previews + initial unread counts + global subscription
+  useEffect(() => {
+    const allThreads = [...mine.map(g => ({ id: g.id })), ...dmThreadList];
 
-  const groupThreads = mine.map(g => {
-    const m = msgs?.[g.id] || [];
-    const last = m[m.length-1];
-    return { id:g.id, type:"group", name:g.name, preview:last?.text?.slice(0,38)||"No messages", ts:last?.ts||g.ts };
-  });
-  const dmThreads = dmKeys.map(k => {
-    const otherId = k.replace("dm_","").split("_").find(p => p !== user.id);
-    const otherUser = MOCK_USERS.find(u => u.id === otherId);
-    const m = msgs?.[k] || [];
-    const last = m[m.length-1];
-    return { id:k, type:"dm", name:otherUser?.name||"?", preview:last?.text?.slice(0,38)||"", ts:last?.ts||0 };
-  });
+    // sidebar previews: last message per thread
+    allThreads.forEach(t => {
+      supabase.from("messages").select("*").eq("thread_id", t.id)
+        .order("created_at", { ascending: false }).limit(1)
+        .then(({ data }) => {
+          if (data?.[0]) {
+            const m = data[0];
+            setPreviews(p => ({ ...p, [t.id]: { text: m.text || "📎 Media", ts: new Date(m.created_at).getTime() } }));
+          }
+        });
+    });
+
+    // initial unread: count messages since last open, not sent by self
+    allThreads.forEach(t => {
+      const since = lastRead[t.id] || "1970-01-01T00:00:00Z";
+      supabase.from("messages").select("id", { count:"exact", head:true })
+        .eq("thread_id", t.id).gt("created_at", since).neq("sender_id", user.id)
+        .then(({ count }) => { if (count) setUnreadMap(p => ({ ...p, [t.id]: count })); });
+    });
+
+    // global subscription for unread on non-active threads
+    const myIds = new Set(allThreads.map(t => t.id));
+    const globalCh = supabase.channel("msgs-unread-global")
+      .on("postgres_changes", { event:"INSERT", schema:"public", table:"messages" }, ({ new: msg }) => {
+        if (!myIds.has(msg.thread_id) || msg.sender_id === user.id) return;
+        if (msg.thread_id === activeRef.current?.id) return;
+        setUnreadMap(p => ({ ...p, [msg.thread_id]: (p[msg.thread_id] || 0) + 1 }));
+        setPreviews(p => ({ ...p, [msg.thread_id]: { text: msg.text || "📎 Media", ts: new Date(msg.created_at).getTime() } }));
+      })
+      .subscribe();
+    globalChRef.current = globalCh;
+    return () => { supabase.removeChannel(globalCh); globalChRef.current = null; };
+  }, []); // intentionally once on mount
+
+  // subscribe to active thread messages
+  useEffect(() => {
+    if (!active) return;
+    if (threadChRef.current) { supabase.removeChannel(threadChRef.current); threadChRef.current = null; }
+
+    setMsgsLoading(true);
+    supabase.from("messages").select("*").eq("thread_id", active.id).order("created_at")
+      .then(({ data }) => { setThreadMsgs((data || []).map(normalizeMsg)); setMsgsLoading(false); });
+
+    const ch = supabase.channel(`thread:${active.id}`)
+      .on("postgres_changes", { event:"INSERT", schema:"public", table:"messages", filter:`thread_id=eq.${active.id}` }, ({ new: msg }) => {
+        const nm = normalizeMsg(msg);
+        setThreadMsgs(p => p.some(m => m.id === nm.id) ? p : [...p, nm]);
+        setPreviews(p => ({ ...p, [active.id]: { text: nm.text || "📎 Media", ts: nm.ts } }));
+      })
+      .subscribe();
+    threadChRef.current = ch;
+    return () => { supabase.removeChannel(ch); threadChRef.current = null; };
+  }, [active?.id]);
+
+  function normalizeMsg(m) {
+    return {
+      id:         m.id,
+      senderId:   m.sender_id   ?? m.senderId   ?? "",
+      senderName: m.sender_name ?? m.senderName ?? "",
+      text:       m.text        ?? "",
+      media:      m.media       ?? null,
+      ts:         m.created_at  ? new Date(m.created_at).getTime() : (m.ts || 0),
+    };
+  }
+
+  function openThread(t) {
+    setActive(t);
+    setShowInfo(false);
+    const now = new Date().toISOString();
+    setLastRead(prev => {
+      const next = { ...prev, [t.id]: now };
+      localStorage.setItem("ec:lastRead", JSON.stringify(next));
+      return next;
+    });
+    setUnreadMap(p => ({ ...p, [t.id]: 0 }));
+  }
 
   function dmKey(aId, bId) { return "dm_" + [aId,bId].sort().join("_"); }
   function canSend(t) {
@@ -1736,22 +1835,32 @@ function ChatPage({ groups, setGroups, jumpGroup }) {
     return true;
   }
 
-  function send() {
+  async function send() {
     if (!input.trim() || !active) return;
     if (!canSend(active)) { toast("Join this group to send messages.", "warning"); return; }
     const text = sanitize(input.trim(), 2000);
     if (!text || !passesContentPolicy(text)) return;
-    const msg = { id:"m"+Date.now(), senderId:user.id, senderName:user.name, text, ts:Date.now() };
-    setMsgs(p => ({ ...p, [active.id]: [...(p[active.id]||[]), msg] }));
     setInput("");
+    const { data, error } = await supabase.from("messages").insert({
+      thread_id: active.id, sender_id: user.id, sender_name: user.name, text,
+    }).select().single();
+    if (error) { toast("Send failed: " + error.message, "error"); return; }
+    const nm = normalizeMsg(data);
+    setThreadMsgs(p => p.some(m => m.id === nm.id) ? p : [...p, nm]);
+    setPreviews(p => ({ ...p, [active.id]: { text: nm.text, ts: nm.ts } }));
   }
 
   function startDM() {
     if (!dmTarget) return;
     const k = dmKey(user.id, dmTarget);
-    setMsgs(p => ({ ...p, [k]: p[k] || [] }));
     const target = MOCK_USERS.find(u => u.id === dmTarget);
-    setActive({ id:k, type:"dm", name:target?.name||"?" });
+    setDmThreadList(prev => {
+      if (prev.some(dt => dt.id === k)) return prev;
+      const next = [...prev, { id:k, name:target?.name||"?", otherId:dmTarget }];
+      localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next));
+      return next;
+    });
+    openThread({ id:k, type:"dm", name:target?.name||"?" });
     setShowDM(false); setDmTarget("");
   }
 
@@ -1762,11 +1871,17 @@ function ChatPage({ groups, setGroups, jumpGroup }) {
     try {
       const ext  = file.name.split(".").pop();
       const path = `${user.id}/${Date.now()}.${ext}`;
-      const { error } = await supabase.storage.from("chat-media").upload(path, file);
-      if (error) throw error;
+      const { error: upErr } = await supabase.storage.from("chat-media").upload(path, file);
+      if (upErr) throw upErr;
       const { data: { publicUrl } } = supabase.storage.from("chat-media").getPublicUrl(path);
-      const msg = { id:"m"+Date.now(), senderId:user.id, senderName:user.name, text:"", media:{ url:publicUrl, type:file.type, name:file.name }, ts:Date.now() };
-      setMsgs(p => ({ ...p, [active.id]: [...(p[active.id]||[]), msg] }));
+      const { data, error } = await supabase.from("messages").insert({
+        thread_id: active.id, sender_id: user.id, sender_name: user.name,
+        text: "", media: { url: publicUrl, type: file.type, name: file.name },
+      }).select().single();
+      if (error) throw error;
+      const nm = normalizeMsg(data);
+      setThreadMsgs(p => p.some(m => m.id === nm.id) ? p : [...p, nm]);
+      setPreviews(p => ({ ...p, [active.id]: { text: "📎 Media", ts: nm.ts } }));
     } catch(e) {
       toast("Upload failed: " + e.message, "error");
     } finally {
@@ -1774,44 +1889,64 @@ function ChatPage({ groups, setGroups, jumpGroup }) {
     }
   }
 
-  const threadMsgs  = active && msgs ? (msgs[active.id]||[]) : [];
-  const activeGroup = active?.type==="group" ? mine.find(g=>g.id===active.id) : null;
-
-  if (!msgs) return <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"calc(100vh - 58px)", gap:".8rem", color:"var(--muted)" }}><Spinner/>Loading…</div>;
+  const activeGroup    = active?.type==="group" ? mine.find(g=>g.id===active.id) : null;
+  const groupThreads   = mine.map(g => ({
+    id:g.id, type:"group", name:g.name,
+    preview: previews[g.id]?.text || "No messages",
+    ts:      previews[g.id]?.ts   || (g.created_at ? new Date(g.created_at).getTime() : g.ts || 0),
+    unread:  unreadMap[g.id] || 0,
+  }));
+  const dmThreadsView  = dmThreadList.map(dt => ({
+    ...dt, type:"dm",
+    preview: previews[dt.id]?.text || "",
+    ts:      previews[dt.id]?.ts   || 0,
+    unread:  unreadMap[dt.id] || 0,
+  }));
 
   return (
     <div className="chat-layout">
+      {/* ── Sidebar ── */}
       <div className="chat-sidebar">
         <div style={{ padding:".85rem 1rem", borderBottom:"2px solid var(--ink)", display:"flex", alignItems:"center", justifyContent:"space-between", background:"var(--paper3)" }}>
           <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em" }}>MESSAGES</div>
           <button className="btn btn-sm btn-orange" onClick={() => setShowDM(true)}>+ DM</button>
         </div>
+
         {groupThreads.length > 0 && <>
           <div style={{ padding:".5rem 1rem .25rem", fontSize:".6rem", fontWeight:700, letterSpacing:".1em", textTransform:"uppercase", color:"var(--muted)", background:"var(--paper2)", borderBottom:"1px solid var(--paper3)" }}>Groups</div>
           {groupThreads.map(t => (
-            <div key={t.id} className={`chat-thread ${active?.id===t.id?"active":""}`} onClick={() => setActive(t)}>
+            <div key={t.id} className={`chat-thread ${active?.id===t.id?"active":""}`} onClick={() => openThread(t)}>
               <Avatar name={t.name[0]} size={32}/>
               <div style={{ flex:1, overflow:"hidden" }}>
                 <div className="thread-name">{t.name}</div>
                 <div className="thread-preview">{t.preview}</div>
               </div>
-              <span className="tag" style={{ fontSize:".55rem", flexShrink:0 }}>Group</span>
+              {t.unread > 0
+                ? <span style={{ background:"var(--orange)", color:"var(--paper)", borderRadius:"999px", fontSize:".6rem", fontWeight:700, padding:"1px 6px", flexShrink:0 }}>{t.unread > 99 ? "99+" : t.unread}</span>
+                : <span className="tag" style={{ fontSize:".55rem", flexShrink:0 }}>Group</span>
+              }
             </div>
           ))}
         </>}
+
         <div style={{ padding:".5rem 1rem .25rem", fontSize:".6rem", fontWeight:700, letterSpacing:".1em", textTransform:"uppercase", color:"var(--muted)", background:"var(--paper2)", borderBottom:"1px solid var(--paper3)" }}>Direct Messages</div>
-        {dmThreads.length === 0 && <div style={{ padding:".8rem 1rem", fontSize:".78rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>No DMs yet — hit + DM to start one.</div>}
-        {dmThreads.map(t => (
-          <div key={t.id} className={`chat-thread ${active?.id===t.id?"active":""}`} onClick={() => setActive(t)}>
-            <Avatar name={t.name} size={32}/>
+        {dmThreadsView.length === 0 && <div style={{ padding:".8rem 1rem", fontSize:".78rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>No DMs yet — hit + DM to start one.</div>}
+        {dmThreadsView.map(t => (
+          <div key={t.id} className={`chat-thread ${active?.id===t.id?"active":""}`} onClick={() => openThread(t)}>
+            <div style={{ position:"relative", flexShrink:0 }}>
+              <Avatar name={t.name} size={32}/>
+              {onlineUsers?.has(t.otherId) && <div style={{ position:"absolute", bottom:0, right:0, width:9, height:9, borderRadius:"50%", background:"var(--green)", border:"2px solid var(--paper)" }}/>}
+            </div>
             <div style={{ flex:1, overflow:"hidden" }}>
               <div className="thread-name">{t.name}</div>
               <div className="thread-preview">{t.preview}</div>
             </div>
+            {t.unread > 0 && <span style={{ background:"var(--orange)", color:"var(--paper)", borderRadius:"999px", fontSize:".6rem", fontWeight:700, padding:"1px 6px", flexShrink:0 }}>{t.unread > 99 ? "99+" : t.unread}</span>}
           </div>
         ))}
       </div>
 
+      {/* ── Main ── */}
       <div className="chat-main" style={{ position:"relative" }}>
         {!active ? (
           <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:"1rem" }}>
@@ -1820,6 +1955,7 @@ function ChatPage({ groups, setGroups, jumpGroup }) {
           </div>
         ) : (
           <>
+            {/* Header */}
             <div style={{ padding:".8rem 1.2rem", borderBottom:"2px solid var(--ink)", display:"flex", alignItems:"center", gap:".8rem", background:"var(--paper2)" }}>
               <Avatar name={active.name} size={32}/>
               <div>
@@ -1834,26 +1970,29 @@ function ChatPage({ groups, setGroups, jumpGroup }) {
                 {activeGroup && <button className="btn btn-ghost btn-sm" onClick={() => setShowInfo(v=>!v)} title="Group info">⋯</button>}
               </div>
             </div>
+
+            {/* Messages */}
             <div className="chat-messages">
-              {threadMsgs.length===0 && <div style={{ textAlign:"center", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", margin:"2rem 0" }}>No messages yet — say something! 👋</div>}
+              {msgsLoading && <div style={{ textAlign:"center", color:"var(--muted)", margin:"2rem 0", display:"flex", alignItems:"center", justifyContent:"center", gap:".5rem" }}><Spinner/>Loading…</div>}
+              {!msgsLoading && threadMsgs.length===0 && <div style={{ textAlign:"center", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", margin:"2rem 0" }}>No messages yet — say something! 👋</div>}
               {threadMsgs.map((m, i) => {
-                const self = m.senderId === user.id;
+                const self       = m.senderId === user.id;
                 const showSender = !self && (i===0 || threadMsgs[i-1]?.senderId !== m.senderId);
                 return (
                   <div key={m.id} style={{ display:"flex", flexDirection:"column", alignItems:self?"flex-end":"flex-start", gap:".12rem", animation:"msgIn .2s ease" }}>
                     {showSender && <div onClick={() => setProfileUser({ id:m.senderId })} style={{ fontSize:".63rem", fontWeight:700, color:avatarColor(m.senderName), marginLeft:"2.6rem", letterSpacing:".04em", cursor:"pointer" }}>{m.senderName}</div>}
                     <div style={{ display:"flex", alignItems:"flex-end", gap:".45rem", flexDirection:self?"row-reverse":"row" }}>
-                      {!self && (i===0 || threadMsgs[i-1]?.senderId!==m.senderId) ? <div onClick={() => setProfileUser({ id:m.senderId })} style={{ cursor:"pointer" }}><Avatar name={m.senderName} size={24}/></div> : <div style={{ width:24 }}/>}
+                      {!self && (i===0 || threadMsgs[i-1]?.senderId!==m.senderId)
+                        ? <div onClick={() => setProfileUser({ id:m.senderId })} style={{ cursor:"pointer" }}><Avatar name={m.senderName} size={24}/></div>
+                        : <div style={{ width:24 }}/>}
                       <div className={`msg-bubble ${self?"msg-self":"msg-other"}`}>
                         {m.media ? (
-                          m.media.type?.startsWith("image/") ? (
-                            <img src={m.media.url} alt={m.media.name} style={{ maxWidth:220, maxHeight:200, borderRadius:4, display:"block", marginBottom:".2rem" }}/>
-                          ) : (
-                            <a href={m.media.url} download={m.media.name} style={{ display:"flex", alignItems:"center", gap:".4rem", color:"inherit" }}>
-                              <span>{fileIcon(m.media.type)}</span>
-                              <span style={{ textDecoration:"underline", fontSize:".8rem" }}>{m.media.name}</span>
-                            </a>
-                          )
+                          m.media.type?.startsWith("image/")
+                            ? <img src={m.media.url} alt={m.media.name} style={{ maxWidth:220, maxHeight:200, borderRadius:4, display:"block", marginBottom:".2rem" }}/>
+                            : <a href={m.media.url} download={m.media.name} style={{ display:"flex", alignItems:"center", gap:".4rem", color:"inherit" }}>
+                                <span>{fileIcon(m.media.type)}</span>
+                                <span style={{ textDecoration:"underline", fontSize:".8rem" }}>{m.media.name}</span>
+                              </a>
                         ) : m.text}
                         <div style={{ fontSize:".6rem", opacity:.55, marginTop:".2rem", textAlign:self?"right":"left" }}>{ftime(m.ts)}</div>
                       </div>
@@ -1863,6 +2002,8 @@ function ChatPage({ groups, setGroups, jumpGroup }) {
               })}
               <div ref={endRef}/>
             </div>
+
+            {/* Input */}
             <div className="chat-input-row">
               {canSend(active) ? (
                 <>
@@ -1875,11 +2016,12 @@ function ChatPage({ groups, setGroups, jumpGroup }) {
                 <div style={{ flex:1, fontSize:".78rem", color:"var(--muted)", fontStyle:"italic", padding:".4rem 0" }}>Join this group to send messages.</div>
               )}
             </div>
-            {showInfo && activeGroup && <GroupInfoPanel group={activeGroup} groups={groups} setGroups={setGroups} msgs={msgs} userId={user.id} onClose={() => setShowInfo(false)}/>}
+            {showInfo && activeGroup && <GroupInfoPanel group={activeGroup} groups={groups} setGroups={setGroups} msgs={{ [activeGroup.id]: threadMsgs }} userId={user.id} onClose={() => setShowInfo(false)}/>}
           </>
         )}
       </div>
 
+      {/* ── Modals ── */}
       {showDM && (
         <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setShowDM(false)}>
           <div className="modal" style={{ maxWidth:360 }}>
@@ -2403,12 +2545,44 @@ function ToolsPage() {
 function AppShell() {
   const { user, sessionLoading } = useAuth();
   const [page, setPage]         = useState("lobby");
-  const [groups, setGroups]     = useState(null);
-  const [jumpGroup, setJumpGroup] = useState(null);
+  const [groups, setGroups]         = useState(null);
+  const [jumpGroup, setJumpGroup]   = useState(null);
   const [lobbyFilter, setLobbyFilter] = useState("all");
+  const [onlineUsers, setOnlineUsers] = useState(new Set());
+  const [messagesUnread, setMessagesUnread] = useState(0);
 
-  useEffect(() => { DB.load("groups", null).then(d => setGroups(d || SEED_GROUPS)); }, []);
-  useEffect(() => { if (groups) DB.save("groups", groups); }, [groups]);
+  // Load groups from Supabase + real-time subscription
+  useEffect(() => {
+    supabase.from("groups").select("*").order("created_at", { ascending: false })
+      .then(({ data }) => setGroups(data?.length ? data : SEED_GROUPS));
+
+    const ch = supabase.channel("groups-rt")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "groups" }, ({ new: g }) =>
+        setGroups(prev => prev.some(x => x.id === g.id) ? prev : [g, ...prev])
+      )
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "groups" }, ({ new: g }) =>
+        setGroups(prev => prev.map(x => x.id === g.id ? g : x))
+      )
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "groups" }, ({ old: g }) =>
+        setGroups(prev => prev.filter(x => x.id !== g.id))
+      )
+      .subscribe();
+    return () => supabase.removeChannel(ch);
+  }, []);
+
+  // Presence tracking
+  useEffect(() => {
+    if (!user) return;
+    const presenceCh = supabase.channel("online-users")
+      .on("presence", { event: "sync" }, () => {
+        const state = presenceCh.presenceState();
+        setOnlineUsers(new Set(Object.values(state).flat().map(p => p.user_id)));
+      })
+      .subscribe(async status => {
+        if (status === "SUBSCRIBED") await presenceCh.track({ user_id: user.id });
+      });
+    return () => supabase.removeChannel(presenceCh);
+  }, [user?.id]);
 
   if (sessionLoading) return <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", gap:".8rem", color:"var(--muted)", fontFamily:"var(--font-display)", letterSpacing:".05em", fontSize:"1.2rem" }}><Spinner/>LOADING…</div>;
   if (!user) return <AuthScreen/>;
@@ -2440,7 +2614,14 @@ function AppShell() {
           <nav style={{ display:"flex", alignItems:"center", flex:1, overflowX:"auto", gap:".1rem" }}>
             {PAGES.map(p => (
               <button key={p.id} className={`nav-link ${page===p.id?"active":""}`} onClick={() => { if (p.id === "lobby") setLobbyFilter("all"); setPage(p.id); }}>
-                {p.icon} {p.label}
+                <span style={{ position:"relative" }}>
+                  {p.icon} {p.label}
+                  {p.id === "messages" && messagesUnread > 0 && (
+                    <span style={{ position:"absolute", top:-7, right:-10, background:"var(--orange)", color:"var(--paper)", borderRadius:"999px", fontSize:".5rem", fontWeight:700, padding:"1px 4px", lineHeight:1.4, pointerEvents:"none" }}>
+                      {messagesUnread > 99 ? "99+" : messagesUnread}
+                    </span>
+                  )}
+                </span>
               </button>
             ))}
           </nav>
@@ -2452,14 +2633,16 @@ function AppShell() {
       </header>
 
       <main style={{ flex:1, overflow:fullPage?"hidden":"auto" }}>
-        {page==="lobby"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups} initCat={lobbyFilter}/></div>}
-        {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={(cats) => { setLobbyFilter(cats?.[0] || "all"); setPage("lobby"); }} goProfile={()=>setPage("profile")}/></div>}
-        {page==="mygroups" && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><MyGroupsPage groups={groups} setGroups={setGroups} goChat={goChat}/></div>}
-        {page==="messages" && <ChatPage groups={groups} setGroups={setGroups} jumpGroup={jumpGroup}/>}
-        {page==="friends"  && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><FriendsPage/></div>}
-        {page==="aichat"   && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><AIChatPage/></div>}
-        {page==="tools"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ToolsPage/></div>}
-        {page==="profile"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ProfilePage/></div>}
+        <OnlineCtx.Provider value={onlineUsers}>
+          {page==="lobby"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups} initCat={lobbyFilter}/></div>}
+          {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={(cats) => { setLobbyFilter(cats?.[0] || "all"); setPage("lobby"); }} goProfile={()=>setPage("profile")}/></div>}
+          {page==="mygroups" && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><MyGroupsPage groups={groups} setGroups={setGroups} goChat={goChat}/></div>}
+          {page==="messages" && <ChatPage groups={groups} setGroups={setGroups} jumpGroup={jumpGroup} onUnreadChange={setMessagesUnread}/>}
+          {page==="friends"  && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><FriendsPage/></div>}
+          {page==="aichat"   && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><AIChatPage/></div>}
+          {page==="tools"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ToolsPage/></div>}
+          {page==="profile"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ProfilePage/></div>}
+        </OnlineCtx.Provider>
       </main>
 
       {!fullPage && (
