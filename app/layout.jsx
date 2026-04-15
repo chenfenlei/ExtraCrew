@@ -1,8 +1,11 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "ExtraCrew — Connecting Students · Building Futures",
-  description: "Find and join extracurricular groups, get AI-powered college advice, and connect with students who share your interests.",
+  title: "ExtraCrew",
+  description: "Connecting Students · Building Futures",
+  icons: {
+    icon: "/favicon.png",
+  },
 };
 
 export default function RootLayout({ children }) {
