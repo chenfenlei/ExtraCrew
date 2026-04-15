@@ -2209,18 +2209,30 @@ function ProfilePage() {
     const cleanActs = activities.map(a => ({
       ...a, position: sanitize(a.position, 50), org_name: sanitize(a.org_name, 100), description: sanitize(a.description, 150),
     }));
-    const updates = {
-      gpa: sanitize(acad.gpa, 10),
-      sat: sanitize(acad.sat, 10),
-      act: sanitize(acad.act, 6),
-      intended_major: sanitize(acad.intended_major, 80),
-      activities: cleanActs,
-      awards,
-      social_links: links,
-    };
-    const { error } = await supabase.from("users").update(updates).eq("id", user.id);
-    if (error) toast("Save failed. Try again.", "error");
-    else { updateProfile(updates); toast("Profile saved!", "success"); }
+    const gpa = sanitize(acad.gpa, 10);
+    const sat = sanitize(acad.sat, 10);
+    const act = sanitize(acad.act, 6);
+    const intended_major = sanitize(acad.intended_major, 80);
+    const { error } = await supabase
+      .from("users")
+      .upsert({
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        avatar: user.avatar,
+        bio: user.bio || "",
+        gpa, sat, act,
+        intended_major,
+        activities: cleanActs,
+        awards,
+      }, { onConflict: "id" });
+    if (error) {
+      toast(error.message, "error");
+      setSaving(false);
+      return;
+    }
+    toast("Profile saved!", "success");
     setSaving(false);
   }
 
