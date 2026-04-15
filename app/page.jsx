@@ -35,20 +35,25 @@ const OnlineCtx = createContext(new Set());
 const useOnline = () => useContext(OnlineCtx);
 
 function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [sessionLoading, setSessionLoading] = useState(true);
+  const [user, setUser] = useState(() => {
+    try { const c = localStorage.getItem("ec_user_cache"); return c ? JSON.parse(c) : null; }
+    catch { return null; }
+  });
+  const [sessionLoading, setSessionLoading] = useState(() => {
+    try { return !localStorage.getItem("ec_user_cache"); }
+    catch { return true; }
+  });
 
   useEffect(() => {
-    // Timeout fallback — if loading takes more than 5 seconds, give up and show login
-    const timeout = setTimeout(() => {
-      setSessionLoading(false);
-    }, 5000);
+    const timeout = setTimeout(() => setSessionLoading(false), 5000);
 
+    // getSession fires immediately; profile fetch follows in parallel with subscription setup
     supabase.auth.getSession().then(async ({ data: { session }, error }) => {
       clearTimeout(timeout);
       if (error || !session?.user) {
-        // Clear any corrupted auth state
         await supabase.auth.signOut();
+        localStorage.removeItem("ec_user_cache");
+        setUser(null);
         setSessionLoading(false);
         return;
       }
@@ -58,9 +63,15 @@ function AuthProvider({ children }) {
           .select("*")
           .eq("id", session.user.id)
           .single();
-        if (profile) setUser({ ...profile, password: undefined });
-      } catch (e) {
+        if (profile) {
+          const u = { ...profile, password: undefined };
+          setUser(u);
+          try { localStorage.setItem("ec_user_cache", JSON.stringify(u)); } catch {}
+        }
+      } catch {
         await supabase.auth.signOut();
+        localStorage.removeItem("ec_user_cache");
+        setUser(null);
       }
       setSessionLoading(false);
     });
@@ -68,6 +79,7 @@ function AuthProvider({ children }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (event === "SIGNED_OUT") {
+          localStorage.removeItem("ec_user_cache");
           setUser(null);
           return;
         }
@@ -77,7 +89,11 @@ function AuthProvider({ children }) {
             .select("*")
             .eq("id", session.user.id)
             .single();
-          if (profile) setUser({ ...profile, password: undefined });
+          if (profile) {
+            const u = { ...profile, password: undefined };
+            setUser(u);
+            try { localStorage.setItem("ec_user_cache", JSON.stringify(u)); } catch {}
+          }
         }
       }
     );
@@ -100,7 +116,9 @@ function AuthProvider({ children }) {
       .select("*")
       .eq("id", data.user.id)
       .single();
-    setUser({ ...profile, password: undefined });
+    const u = { ...profile, password: undefined };
+    setUser(u);
+    try { localStorage.setItem("ec_user_cache", JSON.stringify(u)); } catch {}
     return { ok: true };
   }
 
@@ -131,17 +149,23 @@ function AuthProvider({ children }) {
     const { error: insertError } = await supabase.from("users").insert([profile]);
     if (insertError) return { ok: false, error: insertError.message };
     setUser(profile);
+    try { localStorage.setItem("ec_user_cache", JSON.stringify(profile)); } catch {}
     return { ok: true };
   }
 
   function logout() {
     supabase.auth.signOut();
     sessionStorage.clear();
+    localStorage.removeItem("ec_user_cache");
     setUser(null);
   }
 
   function updateProfile(updates) {
-    setUser(u => ({ ...u, ...updates }));
+    setUser(u => {
+      const next = { ...u, ...updates };
+      try { localStorage.setItem("ec_user_cache", JSON.stringify(next)); } catch {}
+      return next;
+    });
   }
 
   return (
@@ -2573,6 +2597,40 @@ function ToolsPage() {
 // ═══════════════════════════════════════════════════════════════════════════
 // APP SHELL
 // ═══════════════════════════════════════════════════════════════════════════
+function SkeletonShell() {
+  const bar = (w, h = 14, r = 3) => (
+    <div style={{ width: w, height: h, borderRadius: r, background: "var(--ink)", opacity: .08, flexShrink: 0 }} />
+  );
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+      <header style={{ borderBottom: "2px solid var(--ink)", background: "var(--paper)", height: 58, display: "flex", alignItems: "center", padding: "0 1.4rem", gap: "1.4rem", flexShrink: 0 }}>
+        {bar(120, 20)}
+        <div style={{ display: "flex", gap: ".8rem", flex: 1 }}>
+          {[80, 70, 90, 80, 70, 60, 80, 65].map((w, i) => <div key={i}>{bar(w, 14)}</div>)}
+        </div>
+        {bar(80, 32, 2)}
+      </header>
+      <main style={{ flex: 1, maxWidth: 1160, margin: "0 auto", padding: "2rem 1.4rem", width: "100%" }}>
+        <div style={{ display: "grid", gap: "1rem" }}>
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="card" style={{ display: "flex", flexDirection: "column", gap: ".8rem" }}>
+              <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
+                {bar(48, 48, 24)}
+                <div style={{ display: "flex", flexDirection: "column", gap: ".4rem", flex: 1 }}>
+                  {bar("60%", 16)}
+                  {bar("40%", 12)}
+                </div>
+              </div>
+              {bar("90%", 12)}
+              {bar("75%", 12)}
+            </div>
+          ))}
+        </div>
+      </main>
+    </div>
+  );
+}
+
 function AppShell() {
   const { user, sessionLoading } = useAuth();
   const [page, setPage]         = useState("lobby");
@@ -2582,8 +2640,9 @@ function AppShell() {
   const [onlineUsers, setOnlineUsers] = useState(new Set());
   const [messagesUnread, setMessagesUnread] = useState(0);
 
-  // Load groups from Supabase + real-time subscription
+  // Load groups only after user session is confirmed (avoids unauthed Supabase calls)
   useEffect(() => {
+    if (!user) return;
     supabase.from("groups").select("*").order("created_at", { ascending: false })
       .then(({ data }) => setGroups(data?.length ? data : SEED_GROUPS));
 
@@ -2599,7 +2658,7 @@ function AppShell() {
       )
       .subscribe();
     return () => supabase.removeChannel(ch);
-  }, []);
+  }, [user?.id]);
 
   // Presence tracking
   useEffect(() => {
@@ -2615,9 +2674,9 @@ function AppShell() {
     return () => supabase.removeChannel(presenceCh);
   }, [user?.id]);
 
-  if (sessionLoading) return <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", gap:".8rem", color:"var(--muted)", fontFamily:"var(--font-display)", letterSpacing:".05em", fontSize:"1.2rem" }}><Spinner/>LOADING…</div>;
+  if (sessionLoading && !user) return <SkeletonShell/>;
   if (!user) return <AuthScreen/>;
-  if (!groups) return <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", gap:".8rem", color:"var(--muted)", fontFamily:"var(--font-display)", letterSpacing:".05em", fontSize:"1.2rem" }}><Spinner/>LOADING EXTRACREW…</div>;
+  if (!groups) return <SkeletonShell/>;
 
   function goChat(gid) { setJumpGroup(gid); setPage("messages"); }
 
