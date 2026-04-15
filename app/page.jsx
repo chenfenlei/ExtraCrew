@@ -106,51 +106,82 @@ function AuthProvider({ children }) {
 
   async function login(email, password) {
     if (!ClientRateLimit.check("auth")) return { ok: false, error: "Too many attempts. Wait 1 minute." };
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.toLowerCase().trim(),
-      password,
-    });
-    if (error) return { ok: false, error: error.message };
-    const { data: profile } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", data.user.id)
-      .single();
-    const u = { ...profile, password: undefined };
-    setUser(u);
-    try { localStorage.setItem("ec_user_cache", JSON.stringify(u)); } catch {}
-    return { ok: true };
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Request timed out. Try again.")), 8000)
+    );
+
+    try {
+      const { data, error } = await Promise.race([
+        supabase.auth.signInWithPassword({
+          email: email.toLowerCase().trim(),
+          password,
+        }),
+        timeoutPromise,
+      ]);
+
+      if (error) return { ok: false, error: error.message };
+
+      const { data: profile } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", data.user.id)
+        .single();
+
+      const u = { ...profile, password: undefined };
+      setUser(u);
+      try { localStorage.setItem("ec_user_cache", JSON.stringify(u)); } catch {}
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message || "Connection failed. Try again." };
+    }
   }
 
   async function register(name, email, password) {
     if (!ClientRateLimit.check("auth")) return { ok: false, error: "Too many attempts. Wait 1 minute." };
-    const { data, error } = await supabase.auth.signUp({
-      email: email.toLowerCase().trim(),
-      password,
-    });
-    if (error) return { ok: false, error: error.message };
-    const profile = {
-      id: data.user.id,
-      email: email.toLowerCase().trim(),
-      name: sanitize(name, 60),
-      role: "member",
-      avatar: name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase(),
-      bio: "",
-      joined_groups: [],
-      activities: [],
-      awards: [],
-      gpa: "",
-      sat: "",
-      act: "",
-      intended_major: "",
-      avatar_url: "",
-      social_links: {},
-    };
-    const { error: insertError } = await supabase.from("users").insert([profile]);
-    if (insertError) return { ok: false, error: insertError.message };
-    setUser(profile);
-    try { localStorage.setItem("ec_user_cache", JSON.stringify(profile)); } catch {}
-    return { ok: true };
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Request timed out. Try again.")), 8000)
+    );
+
+    try {
+      const { data, error } = await Promise.race([
+        supabase.auth.signUp({
+          email: email.toLowerCase().trim(),
+          password,
+        }),
+        timeoutPromise,
+      ]);
+
+      if (error) return { ok: false, error: error.message };
+
+      const profile = {
+        id: data.user.id,
+        email: email.toLowerCase().trim(),
+        name: sanitize(name, 60),
+        role: "member",
+        avatar: name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase(),
+        bio: "",
+        joined_groups: [],
+        activities: [],
+        awards: [],
+        gpa: "",
+        sat: "",
+        act: "",
+        intended_major: "",
+        avatar_url: "",
+        social_links: {},
+      };
+
+      const { error: insertError } = await supabase.from("users").insert([profile]);
+      if (insertError) return { ok: false, error: insertError.message };
+
+      setUser(profile);
+      try { localStorage.setItem("ec_user_cache", JSON.stringify(profile)); } catch {}
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message || "Connection failed. Try again." };
+    }
   }
 
   function logout() {
