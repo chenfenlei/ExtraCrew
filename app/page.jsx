@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, createContext, useContext } from "react";
+import { useState, useEffect, useRef, createContext, useContext, useMemo, useCallback, memo } from "react";
 import { sanitize, Validators, passesContentPolicy, ClientRateLimit } from "@/lib/security";
 import { callClaude } from "@/lib/api";
 import { CATS, CAT_TAG, SEED_GROUPS, MOCK_USERS, AI_TOOLS } from "@/lib/data";
@@ -259,6 +259,91 @@ function Spinner({ size = 18 }) {
   return <div className="spinner" style={{ width: size, height: size }} />;
 }
 
+// Memoized — repainting the background on every shell render would be wasteful.
+// Parent state changes (online users, unread counts, etc.) shouldn't touch it.
+const SiteBackground = memo(function SiteBackground({ tier = "subtle" }) {
+  const [lowPower, setLowPower] = useState(false);
+  const [hidden, setHidden]     = useState(false);
+
+  // Detect weak hardware / user preference once, and stay in sync with reduced-motion toggles.
+  useEffect(() => {
+    setLowPower(detectLowPower());
+    const mq = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    const onChange = () => setLowPower(detectLowPower());
+    mq?.addEventListener?.("change", onChange);
+    window.addEventListener("resize", onChange, { passive: true });
+    return () => {
+      mq?.removeEventListener?.("change", onChange);
+      window.removeEventListener("resize", onChange);
+    };
+  }, []);
+
+  // Pause expensive animations when the tab isn't visible — saves CPU/battery
+  // and prevents backlog of paint work when the user returns.
+  useEffect(() => {
+    const onVis = () => setHidden(document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // Low-power path: static gradient, no animated layers, cheap paint.
+  if (lowPower) {
+    return <div className="site-bg site-bg--static" data-tier={tier} aria-hidden="true" />;
+  }
+
+  return (
+    <div className={`site-bg ${hidden ? "site-bg--paused" : ""}`} data-tier={tier} aria-hidden="true">
+      <div className="bg-layer bg-grid" />
+      <div className="bg-layer bg-shapes">
+        <span className="bg-shape s1" />
+        <span className="bg-shape s2" />
+        <span className="bg-shape s3" />
+        <span className="bg-shape s4" />
+        <span className="bg-shape s5" />
+      </div>
+      <div className="bg-layer bg-orbs">
+        <span className="bg-orb o1" />
+        <span className="bg-orb o2" />
+      </div>
+      <div className="bg-layer bg-grain" />
+      <div className="bg-layer bg-vignette" />
+    </div>
+  );
+});
+
+const BG_TIER_FOR_PAGE = {
+  lobby: "strong",
+  advisor: "medium",
+  mygroups: "medium",
+  messages: "subtle",
+  friends: "medium",
+  aichat: "subtle",
+  profile: "medium",
+};
+
+// Hoisted once — referential identity stays stable across shell re-renders
+const PAGES_CONFIG = [
+  { id:"lobby",    label:"Lobby",     icon:"🏟" },
+  { id:"advisor",  label:"Advisor",   icon:"📋" },
+  { id:"mygroups", label:"My Groups", icon:"👥" },
+  { id:"messages", label:"Messages",  icon:"💬" },
+  { id:"friends",  label:"Friends",   icon:"🤝" },
+  { id:"aichat",   label:"AI Chat",   icon:"🤖" },
+  { id:"profile",  label:"Profile",   icon:"👤" },
+];
+
+// Low-power detection — hint used by SiteBackground and heavy lists to trim work.
+// Evaluated once at module load; re-checked via matchMedia listener.
+function detectLowPower() {
+  if (typeof window === "undefined") return false;
+  const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  const saveData = typeof navigator !== "undefined" && navigator.connection?.saveData;
+  const cores = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 8) : 8;
+  const mem   = typeof navigator !== "undefined" ? (navigator.deviceMemory || 4) : 4;
+  const narrow = window.innerWidth < 700;
+  return Boolean(reduced || saveData || cores <= 4 || mem <= 2 || narrow);
+}
+
 function Avatar({ name, size = 34 }) {
   const col = avatarColor(name);
   return (
@@ -292,6 +377,12 @@ function AuthScreen() {
   const [loading, setLoading] = useState(false);
   const { login, register } = useAuth();
   const toast = useToast();
+
+  // Refs to prevent double-submit on fast repeated clicks / Enter taps / network stalls
+  const inflight = useRef(false);
+  const mounted  = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+
   const s = (k, v) => { setF(p=>({...p,[k]:v})); setErrors(p=>({...p,[k]:""})); setApiErr(""); };
 
   function validate() {
@@ -303,14 +394,33 @@ function AuthScreen() {
     return e;
   }
 
-  async function submit() {
+  async function submit(ev) {
+    if (ev?.preventDefault) ev.preventDefault();
+    if (inflight.current || loading) return;          // hard guard against duplicate submits
     const errs = validate();
     if (Object.keys(errs).length) { setErrors(errs); return; }
+
+    inflight.current = true;
     setLoading(true); setApiErr("");
-    await new Promise(r => setTimeout(r, 300));
-    const res = mode === "login"
-      ? await login(f.email, f.password)
-      : await register(f.name, f.email, f.password);
+
+    // Network-timeout safety — prevents the button from being stuck spinning
+    // forever on a flaky connection. 20s > typical supabase auth p99.
+    const timeoutP = new Promise(resolve =>
+      setTimeout(() => resolve({ ok:false, error:"Network is slow. Please try again." }), 20000)
+    );
+
+    let res;
+    try {
+      const authP = mode === "login"
+        ? login(f.email, f.password)
+        : register(f.name, f.email, f.password);
+      res = await Promise.race([authP, timeoutP]);
+    } catch (err) {
+      res = { ok:false, error: err?.message || "Something went wrong. Try again." };
+    }
+
+    if (!mounted.current) { inflight.current = false; return; }
+    inflight.current = false;
     setLoading(false);
     if (!res.ok) { setApiErr(res.error); return; }
     toast(mode === "login" ? "Welcome back!" : "Account created!", "success");
@@ -318,7 +428,8 @@ function AuthScreen() {
 
   return (
     <div className="auth-screen">
-      <div className="auth-box">
+      <SiteBackground tier="auth" />
+      <div className="auth-box page-surface">
         <div style={{ textAlign:"center", marginBottom:"2rem" }}>
           <div style={{ fontFamily:"var(--font-display)", fontSize:"2.5rem", letterSpacing:".04em", lineHeight:1 }}>
             EXTRA<span style={{ color:"var(--orange)" }}>CREW</span>
@@ -330,49 +441,51 @@ function AuthScreen() {
 
         <div style={{ display:"flex", border:"2px solid var(--ink)", borderRadius:"12px", overflow:"hidden", marginBottom:"1.6rem" }}>
           {["login","register"].map(m => (
-            <button key={m} onClick={() => { setMode(m); setErrors({}); setApiErr(""); }}
-              style={{ flex:1, padding:".5rem", fontFamily:"var(--font-body)", fontWeight:700, fontSize:".7rem", letterSpacing:".07em", textTransform:"uppercase", border:"none", cursor:"pointer", background:mode===m?"var(--ink)":"transparent", color:mode===m?"var(--paper)":"var(--muted)", transition:"all .12s" }}>
+            <button type="button" key={m} disabled={loading} onClick={() => { setMode(m); setErrors({}); setApiErr(""); }}
+              style={{ flex:1, padding:".5rem", fontFamily:"var(--font-body)", fontWeight:700, fontSize:".7rem", letterSpacing:".07em", textTransform:"uppercase", border:"none", cursor:loading?"not-allowed":"pointer", background:mode===m?"var(--ink)":"transparent", color:mode===m?"var(--paper)":"var(--muted)", opacity:loading&&mode!==m?.5:1, transition:"all .12s" }}>
               {m === "login" ? "Sign In" : "Create Account"}
             </button>
           ))}
         </div>
 
-        <div style={{ display:"flex", flexDirection:"column", gap:".85rem" }}>
-          {mode === "register" && (
+        <form onSubmit={submit} noValidate style={{ display:"flex", flexDirection:"column", gap:".85rem" }}>
+          {/* fieldset disables every input+button during submit so a slow network
+              can't produce a second click or keystroke mid-request */}
+          <fieldset disabled={loading} style={{ border:"none", padding:0, display:"contents" }}>
+            {mode === "register" && (
+              <div>
+                <label>Full Name</label>
+                <input autoComplete="name" value={f.name} onChange={e=>s("name",e.target.value)} placeholder="Alex Johnson" className={errors.name?"error":""} maxLength={60}/>
+                {errors.name && <div className="field-error">{errors.name}</div>}
+              </div>
+            )}
             <div>
-              <label>Full Name</label>
-              <input value={f.name} onChange={e=>s("name",e.target.value)} placeholder="Alex Johnson" className={errors.name?"error":""} maxLength={60}/>
-              {errors.name && <div className="field-error">{errors.name}</div>}
+              <label>Email</label>
+              <input type="email" inputMode="email" autoComplete="email" value={f.email} onChange={e=>s("email",e.target.value)} placeholder="you@school.edu" className={errors.email?"error":""}/>
+              {errors.email && <div className="field-error">{errors.email}</div>}
             </div>
-          )}
-          <div>
-            <label>Email</label>
-            <input type="email" value={f.email} onChange={e=>s("email",e.target.value)} placeholder="you@school.edu" className={errors.email?"error":""}/>
-            {errors.email && <div className="field-error">{errors.email}</div>}
-          </div>
-          <div>
-            <label>Password</label>
-            <input type="password" value={f.password} onChange={e=>s("password",e.target.value)} placeholder={mode==="register"?"Min. 8 characters":"••••••••"} className={errors.password?"error":""}
-              onKeyDown={e=>e.key==="Enter"&&mode==="login"&&submit()} maxLength={128}/>
-            {errors.password && <div className="field-error">{errors.password}</div>}
-          </div>
-          {mode === "register" && (
             <div>
-              <label>Confirm Password</label>
-              <input type="password" value={f.confirm} onChange={e=>s("confirm",e.target.value)} placeholder="Repeat password" className={errors.confirm?"error":""}
-                onKeyDown={e=>e.key==="Enter"&&submit()}/>
-              {errors.confirm && <div className="field-error">{errors.confirm}</div>}
+              <label>Password</label>
+              <input type="password" autoComplete={mode==="login"?"current-password":"new-password"} value={f.password} onChange={e=>s("password",e.target.value)} placeholder={mode==="register"?"Min. 8 characters":"••••••••"} className={errors.password?"error":""} maxLength={128}/>
+              {errors.password && <div className="field-error">{errors.password}</div>}
             </div>
-          )}
-          {apiErr && (
-            <div style={{ background:"var(--red-lt)", border:"2px solid var(--red)", padding:".6rem .8rem", fontSize:".78rem", color:"var(--red)", fontWeight:600 }}>
-              ✗ {apiErr}
-            </div>
-          )}
-          <button className="btn btn-orange" onClick={submit} disabled={loading} style={{ justifyContent:"center", marginTop:".3rem" }}>
-            {loading ? <><Spinner size={14}/>Processing…</> : mode==="login" ? "Sign In →" : "Create Account →"}
-          </button>
-        </div>
+            {mode === "register" && (
+              <div>
+                <label>Confirm Password</label>
+                <input type="password" autoComplete="new-password" value={f.confirm} onChange={e=>s("confirm",e.target.value)} placeholder="Repeat password" className={errors.confirm?"error":""}/>
+                {errors.confirm && <div className="field-error">{errors.confirm}</div>}
+              </div>
+            )}
+            {apiErr && (
+              <div role="alert" aria-live="polite" style={{ background:"var(--red-lt)", border:"2px solid var(--red)", padding:".6rem .8rem", fontSize:".78rem", color:"var(--red)", fontWeight:600 }}>
+                ✗ {apiErr}
+              </div>
+            )}
+            <button type="submit" className="btn btn-orange" disabled={loading} aria-busy={loading} style={{ justifyContent:"center", marginTop:".3rem" }}>
+              {loading ? <><Spinner size={14}/>{mode==="login"?"Signing in…":"Creating account…"}</> : mode==="login" ? "Sign In →" : "Create Account →"}
+            </button>
+          </fieldset>
+        </form>
 
         <div style={{ marginTop:"1.4rem", padding:"1rem", background:"var(--paper2)", border:"1.5px solid var(--paper3)", fontSize:".72rem", color:"var(--muted)" }}>
           <div style={{ fontWeight:700, letterSpacing:".05em", textTransform:"uppercase", marginBottom:".4rem", fontSize:".62rem" }}>Demo Credentials</div>
@@ -1022,7 +1135,10 @@ const CAT_BG      = { blue:"var(--blue-lt)",   red:"var(--red-lt)",   green:"var
 const CAT_ACCENT  = { blue:"var(--blue)",      red:"var(--red)",      green:"var(--green)",      orange:"var(--orange)"      };
 const CAT_SHADOW  = { blue:"#1a3a6b55",        red:"#c0392b55",       green:"#1a6b3c55",         orange:"#e8500a55"          };
 
-function GroupCard({ g, onJoin, onApply, userId }) {
+// memo'd — lobby with hundreds of groups would re-render every card on any
+// sibling update (filter change, unrelated toast). Custom compare only
+// re-renders when a card's own data / membership state changes.
+const GroupCard = memo(function GroupCard({ g, onJoin, onApply, userId }) {
   const { user: currentUser } = useAuth();
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileUser, setProfileUser] = useState(null);
@@ -1087,7 +1203,10 @@ function GroupCard({ g, onJoin, onApply, userId }) {
       {profileOpen && profileUser && <UserProfileModal u={profileUser} onClose={() => { setProfileOpen(false); setProfileUser(null); }}/>}
     </>
   );
-}
+}, (prev, next) => (
+  // Only re-render when this card's own data or viewer identity actually changes.
+  prev.g === next.g && prev.userId === next.userId && prev.onJoin === next.onJoin && prev.onApply === next.onApply
+));
 
 function CreateModal({ onClose, onCreate, userId, userName }) {
   const toast = useToast();
@@ -1245,20 +1364,29 @@ function LobbyPage({ groups, setGroups, initCat }) {
     }
   }
 
-  async function join(id) {
+  // Track in-flight join attempts so rapid double-clicks don't submit twice.
+  const joining = useRef(new Set());
+  const join = useCallback(async (id) => {
+    if (joining.current.has(id)) return;
     const g = groups.find(x => x.id === id);
     if (!g || g.members.includes(user.id)) return;
     if (g.members.length >= g.max) { toast("This group is full.", "warning"); return; }
+    joining.current.add(id);
     const newMembers = [...g.members, user.id];
+    // Optimistic update — UI reacts instantly under real traffic
     setGroups(gs => gs.map(x => x.id===id ? {...x, members:newMembers} : x));
-    const { error } = await supabase.from("groups").update({ members: newMembers }).eq("id", id);
-    if (error) {
-      setGroups(gs => gs.map(x => x.id===id ? {...x, members:x.members.filter(m=>m!==user.id)} : x));
-      toast("Failed to join: " + error.message, "error");
-    } else {
+    try {
+      const { error } = await supabase.from("groups").update({ members: newMembers }).eq("id", id);
+      if (error) throw error;
       toast(`Joined "${g.name}"!`, "success");
+    } catch (err) {
+      // Roll back on failure so the UI stays truthful
+      setGroups(gs => gs.map(x => x.id===id ? {...x, members:x.members.filter(m=>m!==user.id)} : x));
+      toast("Failed to join: " + (err?.message || "network error"), "error");
+    } finally {
+      joining.current.delete(id);
     }
-  }
+  }, [groups, user.id, setGroups, toast]);
 
   async function apply(id, appData) {
     const g = groups.find(x => x.id === id);
@@ -1268,14 +1396,22 @@ function LobbyPage({ groups, setGroups, initCat }) {
     toast("Application submitted!", "success");
   }
 
-  const filtered = groups.filter(g => {
-    if (cat !== "all" && g.category !== cat) return false;
-    if (fmt === "remote" && !g.remote) return false;
-    if (fmt === "local"  &&  g.remote) return false;
-    if (q && ![g.name, g.desc, ...g.tags].some(x => x.toLowerCase().includes(q.toLowerCase()))) return false;
-    if (passDistIds !== null && !passDistIds.has(g.id)) return false;
-    return true;
-  });
+  // Memoized filter — with hundreds of groups we don't want to re-scan on every
+  // unrelated state change (modal open, toasts, etc.).
+  const filtered = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    return groups.filter(g => {
+      if (cat !== "all" && g.category !== cat) return false;
+      if (fmt === "remote" && !g.remote) return false;
+      if (fmt === "local"  &&  g.remote) return false;
+      if (query && ![g.name, g.desc, ...g.tags].some(x => x.toLowerCase().includes(query))) return false;
+      if (passDistIds !== null && !passDistIds.has(g.id)) return false;
+      return true;
+    });
+  }, [groups, cat, fmt, q, passDistIds]);
+
+  // Stable callback refs so <GroupCard> (memoized) doesn't rerender across filters.
+  const onCardApply = useCallback((grp) => setApplyGroup(grp), []);
 
   return (
     <div style={{ padding:"2rem 0" }}>
@@ -1330,7 +1466,7 @@ function LobbyPage({ groups, setGroups, initCat }) {
         </div>
       ) : (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(288px,1fr))", gap:"1rem" }}>
-          {filtered.map(g => <GroupCard key={g.id} g={g} onJoin={join} onApply={(grp) => setApplyGroup(grp)} userId={user.id}/>)}
+          {filtered.map(g => <GroupCard key={g.id} g={g} onJoin={join} onApply={onCardApply} userId={user.id}/>)}
         </div>
       )}
       {modal && <CreateModal onClose={() => setModal(false)} userId={user.id} userName={user.name} onCreate={g => { setGroups(p=>[g,...p]); setModal(false); toast("Group created!", "success"); }}/>}
@@ -2541,16 +2677,9 @@ function ProfilePage() {
         {saving ? <><Spinner size={14}/>Saving…</> : "Save Profile →"}
       </button>
 
-      {/* Security */}
-      <div className="card">
-        <div style={{ fontSize:".68rem", fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".6rem" }}>Security Status</div>
-        <div style={{ fontSize:".78rem", color:"var(--muted)", lineHeight:1.8, marginBottom:"1rem" }}>
-          <div>✓ Session token active (expires in 24h)</div>
-          <div>✓ All inputs sanitized before use</div>
-          <div>✓ API key never sent to browser</div>
-          <div>✓ Rate limiting enforced — {ClientRateLimit.remaining("claude")} AI calls left this minute</div>
-        </div>
-        <button className="btn btn-ghost" onClick={logout} style={{ alignSelf:"flex-start" }}>Sign Out →</button>
+      <div className="card" style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div style={{ fontSize:".72rem", color:"var(--muted)" }}>Signed in as <strong style={{ color:"var(--ink)" }}>{user.email}</strong></div>
+        <button className="btn btn-ghost" onClick={logout}>Sign Out →</button>
       </div>
     </div>
   );
@@ -2559,72 +2688,6 @@ function ProfilePage() {
 // ═══════════════════════════════════════════════════════════════════════════
 // DEV TOOLS
 // ═══════════════════════════════════════════════════════════════════════════
-function ToolsPage() {
-  const [open, setOpen]     = useState(null);
-  const [filter, setFilter] = useState("All");
-  const cats  = ["All", ...Array.from(new Set(AI_TOOLS.map(t=>t.cat)))];
-  const shown = AI_TOOLS.filter(t => filter==="All" || t.cat===filter);
-
-  return (
-    <div style={{ padding:"2rem 0" }}>
-      <div style={{ borderBottom:"2px solid var(--ink)", paddingBottom:"1.5rem", marginBottom:"2rem" }}>
-        <div style={{ fontFamily:"var(--font-display)", fontSize:"clamp(2.5rem,7vw,4.5rem)", lineHeight:.9, letterSpacing:".02em" }}>DEV TOOLS<br/><span style={{ WebkitTextStroke:"2px var(--ink)", color:"transparent" }}>GUIDE</span></div>
-        <p style={{ marginTop:".8rem", color:"var(--muted)", fontStyle:"italic", fontFamily:"var(--font-serif)", fontSize:"1rem", maxWidth:580 }}>Recommended tools to wire a production backend into ExtraCrew.</p>
-      </div>
-
-      <div style={{ border:"2px solid var(--ink)", padding:"1rem 1.4rem", marginBottom:"1.5rem", background:"var(--paper2)", boxShadow:"4px 4px 0 var(--ink)", display:"flex", gap:0, overflowX:"auto", alignItems:"center" }}>
-        {[{l:"Browser",s:"React",c:"var(--orange)"},{l:"→",s:"",c:"var(--muted2)"},{l:"/api/claude",s:"Vercel fn",c:"var(--blue)"},{l:"→",s:"",c:"var(--muted2)"},{l:"Anthropic",s:"API Key hidden",c:"var(--ink)"}].map((n,i)=>(
-          <div key={i} style={{ display:"flex", flexDirection:"column", alignItems:"center", padding:".4rem .8rem", minWidth:n.l==="→"?28:100 }}>
-            <div style={{ fontFamily:n.l==="→"?"var(--font-body)":"var(--font-display)", fontSize:n.l==="→"?"1.2rem":".95rem", color:n.c, lineHeight:1, letterSpacing:".04em" }}>{n.l}</div>
-            {n.s && <div style={{ fontSize:".62rem", color:"var(--muted)", marginTop:".2rem", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>{n.s}</div>}
-          </div>
-        ))}
-      </div>
-
-      <div style={{ border:"2px solid var(--green)", padding:"1rem 1.4rem", marginBottom:"2rem", background:"var(--green-lt)", display:"flex", gap:"1.5rem", flexWrap:"wrap", alignItems:"center" }}>
-        <div style={{ fontFamily:"var(--font-display)", fontSize:"1.1rem", letterSpacing:".04em", color:"var(--green)" }}>SECURITY ACTIVE</div>
-        {["API Key Hidden","Rate Limiting","Input Sanitization","XSS Prevention","CSP Headers","Session Auth","Content Policy"].map(s=>(
-          <span key={s} style={{ fontSize:".65rem", fontWeight:700, color:"var(--green)" }}>✓ {s}</span>
-        ))}
-      </div>
-
-      <div style={{ display:"flex", gap:".4rem", flexWrap:"wrap", marginBottom:"1.4rem" }}>
-        {cats.map(c=>(
-          <button key={c} onClick={()=>setFilter(c)} style={{ fontFamily:"var(--font-body)", fontWeight:700, fontSize:".67rem", letterSpacing:".06em", textTransform:"uppercase", border:"2px solid var(--ink)", background:filter===c?"var(--orange)":"transparent", color:filter===c?"#fff":"var(--ink)", padding:".28rem .7rem", cursor:"pointer", transition:"all .1s" }}>{c}</button>
-        ))}
-      </div>
-
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))", gap:"1rem" }}>
-        {shown.map(t=>(
-          <div key={t.id} className={`tool-card ${open===t.id?"open":""}`} onClick={()=>setOpen(open===t.id?null:t.id)}>
-            <div style={{ display:"flex", alignItems:"flex-start", gap:".8rem", marginBottom:".8rem" }}>
-              <div style={{ width:40, height:40, border:"2px solid var(--ink)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"1.2rem", flexShrink:0, background:"var(--paper2)" }}>{t.icon}</div>
-              <div style={{ flex:1 }}>
-                <div style={{ fontFamily:"var(--font-body)", fontWeight:700, fontSize:".97rem" }}>{t.name}</div>
-                <span className="tag" style={{ fontSize:".58rem", marginTop:".25rem" }}>{t.cat}</span>
-              </div>
-              <div style={{ fontSize:".7rem", fontWeight:700, color:"var(--muted)", textTransform:"uppercase" }}>{open===t.id?"▲":"▼"}</div>
-            </div>
-            <p style={{ fontSize:".82rem", color:"var(--muted)", lineHeight:1.6, fontStyle:"italic", fontFamily:"var(--font-serif)", marginBottom:".85rem" }}>{t.desc}</p>
-            <div style={{ display:"flex", flexDirection:"column", gap:".2rem", marginBottom:".85rem" }}>
-              {t.uses.map(u=><div key={u} style={{ fontSize:".72rem", display:"flex", gap:".4rem" }}><span style={{ color:"var(--orange)", fontWeight:700, flexShrink:0 }}>—</span>{u}</div>)}
-            </div>
-            {open===t.id && (
-              <div style={{ borderTop:"2px solid var(--ink)", paddingTop:".85rem", marginTop:".3rem", animation:"fadeUp .2s ease" }} onClick={e=>e.stopPropagation()}>
-                <div style={{ fontSize:".62rem", fontWeight:700, letterSpacing:".09em", textTransform:"uppercase", color:"var(--orange)", marginBottom:".5rem" }}>Integration Notes</div>
-                <p style={{ fontSize:".8rem", color:"var(--muted)", lineHeight:1.65, marginBottom:".9rem", fontStyle:"italic", fontFamily:"var(--font-serif)" }}>{t.how}</p>
-                <a href={t.link} target="_blank" rel="noopener noreferrer" style={{ textDecoration:"none" }}>
-                  <button className="btn btn-ghost btn-sm">Visit {t.name} →</button>
-                </a>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // APP SHELL
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2711,29 +2774,22 @@ function AppShell() {
 
   function goChat(gid) { setJumpGroup(gid); setPage("messages"); }
 
-  const PAGES = [
-    { id:"lobby",    label:"Lobby",     icon:"🏟" },
-    { id:"advisor",  label:"Advisor",   icon:"📋" },
-    { id:"mygroups", label:"My Groups", icon:"👥" },
-    { id:"messages", label:"Messages",  icon:"💬" },
-    { id:"friends",  label:"Friends",   icon:"🤝" },
-    { id:"aichat",   label:"AI Chat",   icon:"🤖" },
-    { id:"tools",    label:"Dev Tools", icon:"🛠"  },
-    { id:"profile",  label:"Profile",   icon:"👤" },
-  ];
+  // PAGES is hoisted to module scope (PAGES_CONFIG) to avoid re-allocating on every render
 
   const fullPage = page === "messages";
+  const bgTier = BG_TIER_FOR_PAGE[page] || "subtle";
 
   return (
-    <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column" }}>
-      <header style={{ borderBottom:"2px solid var(--ink)", background:"var(--paper)", position:"sticky", top:0, zIndex:50, flexShrink:0 }}>
+    <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column", position:"relative" }}>
+      <SiteBackground tier={bgTier} />
+      <header className="page-surface" style={{ borderBottom:"2px solid var(--ink)", background:"var(--paper)", position:"sticky", top:0, zIndex:50, flexShrink:0 }}>
         <div style={{ maxWidth:fullPage?"100%":1160, margin:"0 auto", padding:"0 1.4rem", height:58, display:"flex", alignItems:"center", gap:"1.4rem" }}>
           <div onClick={() => { setLobbyFilter("all"); setPage("lobby"); }} style={{ cursor:"pointer", flexShrink:0, display:"flex", alignItems:"baseline" }}>
             <span style={{ fontFamily:"var(--font-display)", fontSize:"1.35rem", letterSpacing:".05em" }}>EXTRA</span>
             <span style={{ fontFamily:"var(--font-display)", fontSize:"1.35rem", letterSpacing:".05em", color:"var(--orange)" }}>CREW</span>
           </div>
           <nav style={{ display:"flex", alignItems:"center", flex:1, overflowX:"auto", gap:".1rem" }}>
-            {PAGES.map(p => (
+            {PAGES_CONFIG.map(p => (
               <button key={p.id} className={`nav-link ${page===p.id?"active":""}`} onClick={() => { if (p.id === "lobby") setLobbyFilter("all"); setPage(p.id); }}>
                 <span style={{ position:"relative" }}>
                   {p.icon} {p.label}
@@ -2753,21 +2809,20 @@ function AppShell() {
         </div>
       </header>
 
-      <main style={{ flex:1, overflow:fullPage?"hidden":"auto" }}>
+      <main className="page-surface" style={{ flex:1, overflow:fullPage?"hidden":"auto" }}>
         <OnlineCtx.Provider value={onlineUsers}>
-          {page==="lobby"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups} initCat={lobbyFilter}/></div>}
-          {page==="advisor"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={(cats) => { setLobbyFilter(cats?.[0] || "all"); setPage("lobby"); }} goProfile={()=>setPage("profile")}/></div>}
-          {page==="mygroups" && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><MyGroupsPage groups={groups} setGroups={setGroups} goChat={goChat}/></div>}
+          {page==="lobby"    && <div className="page-surface" style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><LobbyPage groups={groups} setGroups={setGroups} initCat={lobbyFilter}/></div>}
+          {page==="advisor"  && <div className="page-surface" style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><AdvisorPage goLobby={(cats) => { setLobbyFilter(cats?.[0] || "all"); setPage("lobby"); }} goProfile={()=>setPage("profile")}/></div>}
+          {page==="mygroups" && <div className="page-surface" style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><MyGroupsPage groups={groups} setGroups={setGroups} goChat={goChat}/></div>}
           {page==="messages" && <ChatPage groups={groups} setGroups={setGroups} jumpGroup={jumpGroup} onUnreadChange={setMessagesUnread}/>}
-          {page==="friends"  && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><FriendsPage/></div>}
-          {page==="aichat"   && <div style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><AIChatPage/></div>}
-          {page==="tools"    && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ToolsPage/></div>}
-          {page==="profile"  && <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ProfilePage/></div>}
+          {page==="friends"  && <div className="page-surface" style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><FriendsPage/></div>}
+          {page==="aichat"   && <div className="page-surface" style={{ maxWidth:860,  margin:"0 auto", padding:"0 1.4rem" }}><AIChatPage/></div>}
+          {page==="profile"  && <div className="page-surface" style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem" }}><ProfilePage/></div>}
         </OnlineCtx.Provider>
       </main>
 
       {!fullPage && (
-        <footer style={{ borderTop:"2px solid var(--ink)", padding:".7rem 1.4rem", display:"flex", justifyContent:"space-between", alignItems:"center", background:"var(--paper2)" }}>
+        <footer className="page-surface" style={{ borderTop:"2px solid var(--ink)", padding:".7rem 1.4rem", display:"flex", justifyContent:"space-between", alignItems:"center", background:"var(--paper2)" }}>
           <div style={{ fontFamily:"var(--font-display)", fontSize:".9rem", letterSpacing:".08em" }}>EXTRACREW</div>
           <div style={{ fontSize:".65rem", fontWeight:600, letterSpacing:".07em", textTransform:"uppercase", color:"var(--muted)" }}>Connecting Students · Building Futures</div>
         </footer>

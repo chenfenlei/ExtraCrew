@@ -3,27 +3,94 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --ink: #0f0e0d;
-  --paper: #f5f0e8;
-  --paper2: #ede8de;
-  --paper3: #e4ddd1;
-  --orange: #e8500a;
-  --orange-lt: #fdf0e8;
-  --chalk: #faf8f4;
-  --muted: #6b6560;
-  --muted2: #9c9590;
-  --green: #1a6b3c;
-  --green-lt: #e8f5ee;
-  --blue: #1a3a6b;
-  --blue-lt: #e8eef5;
-  --red: #c0392b;
-  --red-lt: #faeaea;
+  /* ══════════════════════════════════════════════════════════════════════
+     DESIGN CONTROL PANEL — tune the entire product from here
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* 1) GLOBAL UI MOTION SPEED — one knob for every UI animation.
+        0.7 = slower, more cinematic   1 = default   1.2 = faster   1.5 = very fast */
+  --motion-speed: 1;
+
+  /* 2) BACKGROUND MOTION SPEED — independent knob for ambient 3D background layers.
+        0.5 = dreamy slow   1 = default   1.6 = more alive
+        Keep slower than UI motion so it reads as atmosphere, not action. */
+  --bg-motion-multiplier: 1;
+
+  /* 3) DEPTH INTENSITY — scales every shadow stack.
+        0 = flat  ·  0.6 = subtle  ·  1 = default  ·  1.4 = dramatic */
+  --depth-intensity: 1;
+
+  /* 4) PAGE TRANSITION BEHAVIOR — how sections rise on mount */
+  --page-rise-distance: 18px;
+  --page-rise-depth: 60px;    /* z-offset for 3D recession */
+
+  /* 5) BACKGROUND MOTION DURATIONS — scale with --bg-motion-multiplier */
+  --bg-dur-mesh:  calc(48s / var(--bg-motion-multiplier));
+  --bg-dur-grid:  calc(36s / var(--bg-motion-multiplier));
+  --bg-dur-orb:   calc(22s / var(--bg-motion-multiplier));
+  --bg-dur-grain: calc(24s / var(--bg-motion-multiplier));
+
+  /* 4) ACCENT COLOR — change this single variable to re-theme the product */
+  --accent:        #22427c;    /* Oxford blue — main accent */
+  --accent-2:      #3a5a8e;    /* Steel-blue highlight */
+  --accent-dark:   #16325f;    /* Deep navy for depth */
+  --accent-lt:     #e7eef7;    /* Pale blue wash for backgrounds */
+  --accent-glow:   rgba(34,66,124,.22);
+
+  /* ══════════════════════════════════════════════════════════════════════
+     CORE PALETTE — editorial · premium · tactile · blue-led
+     ══════════════════════════════════════════════════════════════════════ */
+  --ink:       #0c1422;        /* Deep midnight — primary structure */
+  --ink-soft:  #1b2638;        /* Softer ink for secondary borders */
+  --paper:     #f3efe6;        /* Warm off-white background */
+  --paper2:    #ebe5d8;        /* Surface / sidebar */
+  --paper3:    #ddd5c4;        /* Divider / highlight band */
+  --chalk:     #faf7f0;        /* Card surface */
+
+  --muted:     #6b6660;        /* Secondary text */
+  --muted2:    #a09a8d;        /* Tertiary / hint */
+
+  /* Semantic accents — calm, restrained */
+  --sage:      #5a7261;        /* Desaturated success */
+  --sage-lt:   #e7ede8;
+  --amber:     #a6813a;        /* Warm warn (not orange) */
+  --amber-lt:  #f1e8d5;
+  --red:       #a8443a;        /* Muted terra error */
+  --red-lt:    #f1e0dd;
+
+  /* Lavender for rare editorial pops (optional) */
+  --lavender:     #8b88b8;
+  --lavender-lt:  #ece9f1;
+
+  /* ─── Back-compat aliases so existing JSX inline styles re-theme automatically ─── */
+  --orange:     var(--accent);
+  --orange-lt:  var(--accent-lt);
+  --green:      var(--sage);
+  --green-lt:   var(--sage-lt);
+  --blue:       var(--accent-dark);
+  --blue-lt:    var(--accent-lt);
+
+  /* ══════════════════════════════════════════════════════════════════════
+     MOTION TOKENS — durations scale with --motion-speed
+     ══════════════════════════════════════════════════════════════════════ */
+  --dur-xs:  calc(120ms / var(--motion-speed));
+  --dur-sm:  calc(200ms / var(--motion-speed));
+  --dur-md:  calc(320ms / var(--motion-speed));
+  --dur-lg:  calc(520ms / var(--motion-speed));
+  --dur-xl:  calc(720ms / var(--motion-speed));
+  --dur-xxl: calc(1100ms / var(--motion-speed));
+  --ease-out:    cubic-bezier(.22, 1, .36, 1);
+  --ease-in:     cubic-bezier(.55, 0, .78, .44);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+
+  /* Typography */
   --font-display: 'Bebas Neue', sans-serif;
   --font-body: 'Instrument Sans', sans-serif;
   --font-serif: 'Instrument Serif', serif;
 }
 
-html, body { height: 100%; background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 15px; }
+html, body { min-height: 100%; background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 15px; }
 ::selection { background: var(--orange); color: #fff; }
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--paper2); }
@@ -100,9 +167,30 @@ label { font-size: .68rem; font-family: var(--font-body); font-weight: 700; lett
 .thread-preview { font-size: .7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: .1rem; }
 .avatar { display: flex; align-items: center; justify-content: center; font-family: var(--font-body); font-weight: 700; flex-shrink: 0; border: 2px solid currentColor; border-radius: 50%; }
 
-/* Auth */
-.auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--paper); padding: 1.5rem; }
-.auth-box    { background: var(--chalk); border: 3px solid var(--ink); border-radius: 24px; box-shadow: 10px 10px 0 var(--ink); padding: 2.5rem; width: 100%; max-width: 420px; }
+/* Auth — grid centering + dvh so iOS address bar doesn't chop the top, plus
+   vertical padding that guarantees breathing room even on short laptop screens.
+   NO overflow:hidden here — that was clipping the box on viewports shorter
+   than the card (align-items:center clips symmetrically when content overflows). */
+.auth-screen {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  padding: clamp(1.5rem, 4vh, 3rem) 1.5rem;
+  position: relative;
+}
+.auth-box {
+  background: rgba(250,247,240,.92);
+  backdrop-filter: blur(10px) saturate(1.1);
+  -webkit-backdrop-filter: blur(10px) saturate(1.1);
+  border: 3px solid var(--ink);
+  border-radius: 24px;
+  box-shadow: 12px 12px 0 var(--ink), 0 30px 60px -20px rgba(12,20,34,.4);
+  padding: 2.2rem 2.5rem;
+  width: 100%; max-width: 420px;
+  position: relative; z-index: 2;
+  margin: auto;
+}
 
 /* Toast */
 .toast-wrap { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 999; display: flex; flex-direction: column; gap: .5rem; pointer-events: none; }
@@ -133,46 +221,276 @@ label { font-size: .68rem; font-family: var(--font-body); font-weight: 700; lett
    MOTION & ANIMATION LAYER — hand-crafted, not AI-default
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Subtle paper grain that drifts — makes the background feel alive */
-body::before {
-  content: "";
+/* body::before / ::after removed — ambient atmosphere is now owned by the
+   reusable <SiteBackground> component. One system · per-page intensity. */
+
+/* ══════════════════════════════════════════════════════════════════════
+   SITE BACKGROUND SYSTEM — spatial 3D atmosphere across the product
+   Design:  sharp perspective grid + floating wireframe shapes + soft orbs
+            (fewer heavy blurs, more visible geometry → feels 3D, not "blue wash")
+   Stack:   grid (floor) · shapes (mid) · orbs (depth glow) · grain · vignette
+   Tune:    --bg-motion-multiplier in :root  (0.5 = dreamy, 1 = default, 1.6 = alive)
+            --depth-intensity      in :root  (0 = flat, 1 = default, 1.4 = dramatic)
+   ══════════════════════════════════════════════════════════════════════ */
+.site-bg {
   position: fixed; inset: 0;
-  pointer-events: none;
-  background-image:
-    radial-gradient(circle at 20% 30%, rgba(15,14,13,.035) 1px, transparent 1px),
-    radial-gradient(circle at 70% 60%, rgba(15,14,13,.025) 1px, transparent 1px);
-  background-size: 24px 24px, 32px 32px;
-  animation: grain-drift 18s linear infinite;
-  z-index: 0;
-  mix-blend-mode: multiply;
-}
-@keyframes grain-drift {
-  0%   { transform: translate(0,0); }
-  25%  { transform: translate(-6px,4px); }
-  50%  { transform: translate(4px,-3px); }
-  75%  { transform: translate(-3px,-5px); }
-  100% { transform: translate(0,0); }
+  z-index: 0; pointer-events: none;
+  overflow: hidden;
+  perspective: 1200px;
+  perspective-origin: 50% 45%;
+  transform-style: preserve-3d;
+  isolation: isolate;
+  contain: strict;
+  content-visibility: auto;
+  --bg-grid-opacity:    .55;
+  --bg-shapes-opacity:  .75;
+  --bg-orbs-opacity:    .55;
+  --bg-grain-opacity:   .35;
+  --bg-vignette-opacity:.55;
+  --bg-shape-count:     4;
 }
 
-/* Page-in reveal — every top-level section rises in on mount */
-main, section, .hero, [class*="panel"], [class*="card"] {
-  animation: rise-in .7s cubic-bezier(.22,1,.36,1) both;
+/* Pause all child animation when tab hidden — zero CPU in background. */
+.site-bg--paused *,
+.site-bg--paused { animation-play-state: paused !important; }
+
+/* Low-power fallback: one static gradient, no animation, cheap paint. */
+.site-bg--static {
+  background:
+    radial-gradient(ellipse 80% 60% at 25% 30%, rgba(34,66,124,.20), transparent 60%),
+    radial-gradient(ellipse 70% 60% at 80% 75%, rgba(22,50,95,.18), transparent 60%),
+    linear-gradient(180deg, rgba(12,20,34,.04), rgba(12,20,34,0) 40%, rgba(12,20,34,.06));
+}
+
+.bg-layer { position: absolute; inset: 0; will-change: transform; }
+
+/* ── Layer 1: PERSPECTIVE FLOOR — sharp, visibly 3D, the anchor that reads
+     as "spatial depth." Slow pan toward the horizon. */
+.bg-grid {
+  background-image:
+    linear-gradient(to right,  rgba(22,50,95,.26) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(22,50,95,.26) 1px, transparent 1px);
+  background-size: 72px 72px;
+  opacity: var(--bg-grid-opacity);
+  transform-origin: 50% 100%;
+  transform: perspective(700px) rotateX(66deg) translateY(14%) scale(2);
+  mask-image:         radial-gradient(ellipse 60% 80% at 50% 100%, #000 20%, transparent 85%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 80% at 50% 100%, #000 20%, transparent 85%);
+  animation: bg-grid-pan var(--bg-dur-grid) linear infinite;
+}
+@keyframes bg-grid-pan {
+  from { background-position: 0 0; }
+  to   { background-position: 0 72px; }  /* one grid cell — seamless loop */
+}
+
+/* ── Layer 2: FLOATING WIREFRAME SHAPES — sharp-edged geometry rotating in
+     real 3D space. This is what makes the scene read as 3D, not "blurred". */
+.bg-shapes { opacity: var(--bg-shapes-opacity); transform-style: preserve-3d; }
+.bg-shape {
+  position: absolute; display: block;
+  border: 1.5px solid rgba(22,50,95,.45);
+  will-change: transform;
+  transform-style: preserve-3d;
+}
+.bg-shape.s1 {
+  width: 280px; height: 280px;
+  top: 12%; left: 8%;
+  border-radius: 50%;
+  animation: shape-float-a calc(42s / var(--bg-motion-multiplier)) linear infinite;
+}
+.bg-shape.s2 {
+  width: 200px; height: 200px;
+  top: 58%; left: 72%;
+  border-radius: 14%;
+  border-color: rgba(34,66,124,.42);
+  animation: shape-float-b calc(55s / var(--bg-motion-multiplier)) linear infinite;
+}
+.bg-shape.s3 {
+  width: 140px; height: 140px;
+  top: 28%; left: 78%;
+  border-radius: 50%;
+  border-style: dashed;
+  border-color: rgba(139,136,184,.45);
+  animation: shape-float-c calc(48s / var(--bg-motion-multiplier)) linear infinite reverse;
+}
+.bg-shape.s4 {
+  width: 320px; height: 2px;
+  top: 42%; left: 50%;
+  border: none;
+  background: linear-gradient(90deg, transparent, rgba(34,66,124,.55), transparent);
+  animation: shape-float-d calc(36s / var(--bg-motion-multiplier)) var(--ease-in-out) infinite alternate;
+}
+.bg-shape.s5 {
+  width: 220px; height: 220px;
+  top: 70%; left: 12%;
+  clip-path: polygon(50% 0%, 100% 100%, 0% 100%);   /* triangle */
+  border: none;
+  background: linear-gradient(180deg, rgba(34,66,124,.22), rgba(34,66,124,0));
+  animation: shape-float-e calc(60s / var(--bg-motion-multiplier)) linear infinite;
+}
+
+@keyframes shape-float-a {
+  0%   { transform: translate3d(0,0,-40px)  rotate3d(1,1,0, 0deg); }
+  100% { transform: translate3d(30px,-20px,80px) rotate3d(1,1,0, 360deg); }
+}
+@keyframes shape-float-b {
+  0%   { transform: translate3d(0,0,60px)   rotate3d(0,1,.3, 0deg); }
+  100% { transform: translate3d(-40px,30px,-20px) rotate3d(0,1,.3, 360deg); }
+}
+@keyframes shape-float-c {
+  0%   { transform: translate3d(0,0,20px)   rotate3d(1,0,1, 0deg); }
+  100% { transform: translate3d(20px,40px,-60px) rotate3d(1,0,1, -360deg); }
+}
+@keyframes shape-float-d {
+  0%   { transform: translate3d(-50%,-50%,0)    rotate(-4deg)  scaleX(1);   }
+  100% { transform: translate3d(-50%,-50%,120px) rotate(4deg)  scaleX(1.15); }
+}
+@keyframes shape-float-e {
+  0%   { transform: translate3d(0,0,-20px) rotate3d(0,1,0, 0deg); }
+  100% { transform: translate3d(-20px,-40px,60px) rotate3d(0,1,0, 360deg); }
+}
+
+/* ── Layer 3: SOFT COLOR ORBS — depth glow behind shapes. Fewer, less blurred. */
+.bg-orbs { opacity: var(--bg-orbs-opacity); }
+.bg-orb  { position: absolute; display: block; border-radius: 50%; filter: blur(50px); }
+.bg-orb.o1 {
+  width: 48vw; max-width: 560px; aspect-ratio: 1;
+  top: -10%; left: -10%;
+  background: radial-gradient(circle, rgba(34,66,124,.55) 0%, rgba(34,66,124,0) 70%);
+  animation: orb-drift-a calc(26s / var(--bg-motion-multiplier)) var(--ease-in-out) infinite alternate;
+}
+.bg-orb.o2 {
+  width: 42vw; max-width: 500px; aspect-ratio: 1;
+  bottom: -12%; right: -10%;
+  background: radial-gradient(circle, rgba(22,50,95,.50) 0%, rgba(22,50,95,0) 70%);
+  animation: orb-drift-b calc(32s / var(--bg-motion-multiplier)) var(--ease-in-out) infinite alternate;
+}
+@keyframes orb-drift-a {
+  0%   { transform: translate3d(0,0,0)        scale(1);    }
+  100% { transform: translate3d(6%,4%,80px)   scale(1.15); }
+}
+@keyframes orb-drift-b {
+  0%   { transform: translate3d(0,0,0)         scale(1);    }
+  100% { transform: translate3d(-5%,-3%,100px) scale(1.10); }
+}
+
+/* ── Layer 4: paper grain — drifts imperceptibly, sells organic feel. */
+.bg-grain {
+  background-image:
+    radial-gradient(circle at 20% 30%, rgba(12,20,34,.025) 1px, transparent 1px),
+    radial-gradient(circle at 70% 60%, rgba(12,20,34,.02)  1px, transparent 1px);
+  background-size: 24px 24px, 32px 32px;
+  opacity: var(--bg-grain-opacity);
+  mix-blend-mode: multiply;
+  animation: bg-grain-drift var(--bg-dur-grain) linear infinite;
+}
+@keyframes bg-grain-drift {
+  0%, 100% { transform: translate3d(0,    0,   0); }
+  50%      { transform: translate3d(6px, -4px, 0); }
+}
+
+/* ── Layer 5: vignette — frames the view cinematically. Static (cheap). */
+.bg-vignette {
+  background: radial-gradient(ellipse 100% 85% at 50% 50%, transparent 45%, rgba(12,20,34,.14) 100%);
+  opacity: var(--bg-vignette-opacity);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   TIER INTENSITIES — auth is cinematic, chat is whisper-quiet
+   ══════════════════════════════════════════════════════════════════════ */
+.site-bg[data-tier="auth"] {
+  --bg-grid-opacity:    .85;
+  --bg-shapes-opacity:  .90;
+  --bg-orbs-opacity:    .85;
+  --bg-grain-opacity:   .45;
+  --bg-vignette-opacity:.80;
+}
+.site-bg[data-tier="auth"] .bg-grid {
+  background-image:
+    linear-gradient(to right,  rgba(22,50,95,.45) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(22,50,95,.45) 1px, transparent 1px);
+  background-size: 88px 88px;
+  transform: perspective(600px) rotateX(70deg) translateY(10%) scale(2.3);
+}
+
+.site-bg[data-tier="strong"] {
+  --bg-grid-opacity:    .55;
+  --bg-shapes-opacity:  .70;
+  --bg-orbs-opacity:    .70;
+  --bg-grain-opacity:   .40;
+  --bg-vignette-opacity:.65;
+}
+
+.site-bg[data-tier="medium"] {
+  --bg-grid-opacity:    .35;
+  --bg-shapes-opacity:  .55;
+  --bg-orbs-opacity:    .55;
+  --bg-grain-opacity:   .35;
+  --bg-vignette-opacity:.50;
+}
+.site-bg[data-tier="medium"] .bg-shape.s4,
+.site-bg[data-tier="medium"] .bg-shape.s5 { display: none; }
+
+.site-bg[data-tier="subtle"] {
+  --bg-grid-opacity:    0;
+  --bg-shapes-opacity:  .40;
+  --bg-orbs-opacity:    .45;
+  --bg-grain-opacity:   .30;
+  --bg-vignette-opacity:.40;
+}
+.site-bg[data-tier="subtle"] .bg-grid { display: none; }
+.site-bg[data-tier="subtle"] .bg-shape.s3,
+.site-bg[data-tier="subtle"] .bg-shape.s4,
+.site-bg[data-tier="subtle"] .bg-shape.s5 { display: none; }
+
+.site-bg[data-tier="minimal"] {
+  --bg-grid-opacity:    0;
+  --bg-shapes-opacity:  0;
+  --bg-orbs-opacity:    .30;
+  --bg-grain-opacity:   .25;
+  --bg-vignette-opacity:.30;
+}
+.site-bg[data-tier="minimal"] .bg-grid,
+.site-bg[data-tier="minimal"] .bg-shapes { display: none; }
+
+/* Mobile — kill the grid + most shapes, shrink blurs. Keeps 60fps on phones. */
+@media (max-width: 700px) {
+  .bg-grid { display: none; }
+  .bg-shape.s3, .bg-shape.s4, .bg-shape.s5 { display: none; }
+  .bg-orb  { filter: blur(40px); }
+  .site-bg[data-tier="auth"]   .bg-grid { display: block; opacity: .6; }
+}
+
+/* Content must sit above the fixed background */
+.page-surface { position: relative; z-index: 1; }
+
+/* ── Page-in reveal — only once on the main shell, not on every descendant.
+   Previous rule matched [class*="panel"] which triggered on every group info
+   panel, chat sidebar, modal, etc. — costly with many cards/threads. */
+.page-enter {
+  animation: rise-in var(--dur-md) var(--ease-out) both;
 }
 @keyframes rise-in {
   from { opacity: 0; transform: translateY(14px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 
-/* Staggered entrance for list children so feeds feel typed-out not dumped */
-ul > li, .grid > *, [class*="list"] > * {
-  animation: slide-fade .55s cubic-bezier(.22,1,.36,1) both;
+/* Opt-in staggered entrance — apply to a wrapper with .stagger-in.
+   Old implementation used global `ul > li, .grid > *` which ran on every
+   message, every list row, every admin card — janky at scale. */
+.stagger-in > * {
+  animation: slide-fade .45s cubic-bezier(.22,1,.36,1) both;
+  animation-delay: calc(var(--i, 0) * 40ms);
 }
-ul > li:nth-child(2),  .grid > *:nth-child(2)  { animation-delay: .05s; }
-ul > li:nth-child(3),  .grid > *:nth-child(3)  { animation-delay: .10s; }
-ul > li:nth-child(4),  .grid > *:nth-child(4)  { animation-delay: .15s; }
-ul > li:nth-child(5),  .grid > *:nth-child(5)  { animation-delay: .20s; }
-ul > li:nth-child(6),  .grid > *:nth-child(6)  { animation-delay: .25s; }
-ul > li:nth-child(n+7),.grid > *:nth-child(n+7){ animation-delay: .30s; }
+/* Cap the stagger at the first 6 children — beyond that the user has already
+   mentally processed the cascade and further delay just feels sluggish. */
+.stagger-in > *:nth-child(1) { --i: 0; }
+.stagger-in > *:nth-child(2) { --i: 1; }
+.stagger-in > *:nth-child(3) { --i: 2; }
+.stagger-in > *:nth-child(4) { --i: 3; }
+.stagger-in > *:nth-child(5) { --i: 4; }
+.stagger-in > *:nth-child(6) { --i: 5; }
+.stagger-in > *:nth-child(n+7) { --i: 6; }
 @keyframes slide-fade {
   from { opacity: 0; transform: translateX(-8px); }
   to   { opacity: 1; transform: translateX(0); }
@@ -182,13 +500,16 @@ ul > li:nth-child(n+7),.grid > *:nth-child(n+7){ animation-delay: .30s; }
 button, .btn, [role="button"] {
   transition: transform .12s ease, box-shadow .12s ease, background .18s ease !important;
 }
-button:hover, .btn:hover, [role="button"]:hover {
+button:not(:disabled):hover, .btn:not(:disabled):hover, [role="button"]:hover {
   transform: translate(-1px,-1px);
 }
-button:active, .btn:active, [role="button"]:active {
+button:not(:disabled):active, .btn:not(:disabled):active, [role="button"]:active {
   transform: translate(1px,1px) scale(.98);
   transition-duration: .05s !important;
 }
+/* When a submit is in-flight, aria-busy swaps the feedback to "waiting" so the
+   user gets a spinner cursor instead of a seemingly-unresponsive click. */
+button[aria-busy="true"], .btn[aria-busy="true"] { cursor: progress; }
 
 /* Headings get a one-pass underline-sweep on load */
 h1, h2 { position: relative; }
@@ -220,12 +541,13 @@ h1::after, h2::after {
   to   { opacity: 1; transform: translateX(0) rotate(0); }
 }
 
-/* Chat bubble pop */
-[class*="message"], [class*="bubble"] {
-  animation: bubble-pop .35s cubic-bezier(.34,1.56,.64,1) both;
+/* Chat bubble pop — opt-in only. A substring selector on every "message"/"bubble"
+   class triggered layout during message bursts; now runs only on .msg-bubble new. */
+.msg-bubble.msg-enter {
+  animation: bubble-pop .28s cubic-bezier(.34,1.56,.64,1) both;
 }
 @keyframes bubble-pop {
-  from { opacity: 0; transform: scale(.94) translateY(6px); }
+  from { opacity: 0; transform: scale(.96) translateY(4px); }
   to   { opacity: 1; transform: scale(1)   translateY(0); }
 }
 
