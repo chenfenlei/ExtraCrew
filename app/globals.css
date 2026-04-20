@@ -90,6 +90,7 @@
   --font-serif: 'Instrument Serif', serif;
 }
 
+html { scrollbar-gutter: stable; }
 html, body { min-height: 100%; background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 15px; }
 ::selection { background: var(--orange); color: #fff; }
 ::-webkit-scrollbar { width: 6px; }

@@ -8,6 +8,18 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
+// Init-order diagnostic. Enable in browser devtools:
+//   localStorage.setItem("ec:debug", "1"); location.reload();
+// Logs key boot stages so we can prove ordering of: auth → user → groups →
+// threads → active chat → messages → first render.
+const dbg = (stage, extra) => {
+  if (typeof window === "undefined") return;
+  try { if (localStorage.getItem("ec:debug") !== "1") return; } catch { return; }
+  const t = (typeof performance !== "undefined" ? performance.now() : 0).toFixed(0);
+  // eslint-disable-next-line no-console
+  console.log(`[ec-init ${t}ms]`, stage, extra ?? "");
+};
+
 // ─── Distance helpers ─────────────────────────────────────────────────────
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 3958.8;
@@ -35,70 +47,78 @@ const OnlineCtx = createContext(new Set());
 const useOnline = () => useContext(OnlineCtx);
 
 function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    try { const c = localStorage.getItem("ec_user_cache"); return c ? JSON.parse(c) : null; }
-    catch { return null; }
-  });
-  const [sessionLoading, setSessionLoading] = useState(() => {
-    try { return !localStorage.getItem("ec_user_cache"); }
-    catch { return true; }
-  });
+  // Always start with no user. We previously hydrated from localStorage
+  // ("ec_user_cache") for an instant first paint, but that made stale cached
+  // data the source of truth on first render — descendant components
+  // (ProfilePage, ChatPage, etc.) would snapshot stale fields via
+  // `useState(() => user?.x)` initializers and never resync when fresh
+  // server data arrived. The result: stale UI on every first load until a
+  // hard refresh. Now downstream components only mount AFTER fresh user
+  // data is loaded, so their initializers see the current truth.
+  const [user, setUser] = useState(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
 
   useEffect(() => {
-    const timeout = setTimeout(() => setSessionLoading(false), 5000);
+    let mounted = true;
+    dbg("auth:init-start");
 
-    // getSession fires immediately; profile fetch follows in parallel with subscription setup
-    supabase.auth.getSession().then(async ({ data: { session }, error }) => {
-      clearTimeout(timeout);
-      if (error || !session?.user) {
-        await supabase.auth.signOut();
-        localStorage.removeItem("ec_user_cache");
-        setUser(null);
-        setSessionLoading(false);
-        return;
-      }
-      try {
-        const { data: profile } = await supabase
-          .from("users")
-          .select("*")
-          .eq("id", session.user.id)
-          .single();
-        if (profile) {
-          const u = { ...profile, password: undefined };
-          setUser(u);
-          try { localStorage.setItem("ec_user_cache", JSON.stringify(u)); } catch {}
-        }
-      } catch {
-        await supabase.auth.signOut();
-        localStorage.removeItem("ec_user_cache");
-        setUser(null);
-      }
+    // Safety net so the app doesn't sit on the skeleton forever if Supabase
+    // never replies (e.g. offline). Set well above normal latency.
+    const timeout = setTimeout(() => {
+      if (!mounted) return;
+      dbg("auth:init-timeout");
       setSessionLoading(false);
-    });
+    }, 5000);
 
+    // Single source of truth for auth state. Supabase emits an INITIAL_SESSION
+    // event immediately on subscribe with the persisted session (if any), so
+    // we no longer need the parallel `getSession().then(...)` path that used
+    // to race this subscription and trigger a duplicate profile fetch.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        if (event === "SIGNED_OUT") {
-          localStorage.removeItem("ec_user_cache");
+        if (!mounted) return;
+        dbg("auth:event", event);
+
+        if (event === "SIGNED_OUT" || !session?.user) {
+          try { localStorage.removeItem("ec_user_cache"); } catch {}
           setUser(null);
+          setSessionLoading(false);
+          clearTimeout(timeout);
           return;
         }
-        if (session?.user) {
-          const { data: profile } = await supabase
+
+        try {
+          const { data: profile, error } = await supabase
             .from("users")
             .select("*")
             .eq("id", session.user.id)
             .single();
-          if (profile) {
+          if (!mounted) return;
+          if (error || !profile) {
+            await supabase.auth.signOut();
+            try { localStorage.removeItem("ec_user_cache"); } catch {}
+            setUser(null);
+          } else {
             const u = { ...profile, password: undefined };
             setUser(u);
+            // Cache is kept only as a hint for non-render code paths; it is
+            // intentionally NOT read back into React state on mount.
             try { localStorage.setItem("ec_user_cache", JSON.stringify(u)); } catch {}
+            dbg("auth:profile-loaded", u.id);
           }
+        } catch {
+          if (!mounted) return;
+          await supabase.auth.signOut();
+          try { localStorage.removeItem("ec_user_cache"); } catch {}
+          setUser(null);
         }
+        setSessionLoading(false);
+        clearTimeout(timeout);
       }
     );
 
     return () => {
+      mounted = false;
       clearTimeout(timeout);
       subscription.unsubscribe();
     };
@@ -611,20 +631,304 @@ function UserProfileModal({ userId, u: initialU, onClose }) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ─── Call modal (Whereby embedded room) ──────────────────────────────────
-function CallModal({ title, roomId, type, onClose }) {
+// ═══════════════════════════════════════════════════════════════════════════
+// 1:1 VOICE / VIDEO CALLING  (WebRTC + Supabase broadcast signaling)
+//
+// Signaling layout:
+//   ring:{userId}               ephemeral broadcast, one-shot — used to alert
+//                                a user to an incoming call and to deliver
+//                                "decline" back to the caller.
+//   call-pair:{a}:{b} (sorted)  persistent per-call broadcast — carries the
+//                                SDP offer/answer, ICE candidates, and hangup.
+//
+// Flow:
+//   caller: subscribe pair → getUserMedia → build PC → ring callee → wait for
+//           "ready" on pair → send offer → receive answer → ICE trickle.
+//   callee: receive ring   → show incoming UI → on accept: subscribe pair,
+//           getUserMedia, build PC, emit "ready" → receive offer → answer →
+//           ICE trickle.
+// ═══════════════════════════════════════════════════════════════════════════
+const CallCtx = createContext(null);
+const useCall = () => useContext(CallCtx);
+
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+const pairName = (a, b) => "call-pair:" + [a, b].sort().join(":");
+
+function CallProvider({ children }) {
+  const { user } = useAuth();
+  const toast = useToast();
+
+  const [state, _setState] = useState({
+    status: "idle", // idle | calling | ringing | connecting | in_call
+    type: null,
+    isCaller: false,
+    peerId: null,
+    peerName: null,
+    muted: false,
+    cameraOff: false,
+  });
+  const stateRef = useRef(state);
+  const setState = useCallback((u) => {
+    _setState(p => {
+      const next = typeof u === "function" ? u(p) : { ...p, ...u };
+      stateRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+
+  const pcRef         = useRef(null);
+  const pairChRef     = useRef(null);
+  const pendingIceRef = useRef([]);
+  const offerSentRef  = useRef(false);
+
+  // ── helpers ────────────────────────────────────────────────────────
+  async function sendToRing(toUserId, event, payload = {}) {
+    const ch = supabase.channel(`ring:${toUserId}`);
+    await new Promise(res => ch.subscribe(s => s === "SUBSCRIBED" && res()));
+    await ch.send({ type: "broadcast", event, payload: { ...payload, from: user.id, fromName: user.name } });
+    supabase.removeChannel(ch);
+  }
+
+  async function sendOnPair(event, payload = {}) {
+    const ch = pairChRef.current;
+    if (!ch) return;
+    await ch.send({ type: "broadcast", event, payload: { ...payload, from: user.id } });
+  }
+
+  function cleanup() {
+    try { pcRef.current?.close(); } catch {}
+    pcRef.current = null;
+    if (pairChRef.current) { try { supabase.removeChannel(pairChRef.current); } catch {} pairChRef.current = null; }
+    setLocalStream(prev => { prev?.getTracks().forEach(t => t.stop()); return null; });
+    setRemoteStream(null);
+    pendingIceRef.current = [];
+    offerSentRef.current = false;
+    setState({ status:"idle", type:null, isCaller:false, peerId:null, peerName:null, muted:false, cameraOff:false });
+  }
+
+  async function initPeer(type) {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pcRef.current = pc;
+
+    const constraints = type === "video" ? { audio: true, video: true } : { audio: true, video: false };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    setLocalStream(stream);
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+    pc.ontrack = (e) => setRemoteStream(e.streams[0]);
+    pc.onicecandidate = (e) => { if (e.candidate) sendOnPair("ice", { candidate: e.candidate.toJSON() }); };
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (s === "connected") setState({ status: "in_call" });
+      if ((s === "failed" || s === "disconnected" || s === "closed") && stateRef.current.status !== "idle") cleanup();
+    };
+    return pc;
+  }
+
+  async function openPair(peerId) {
+    const ch = supabase.channel(pairName(user.id, peerId), { config: { broadcast: { self: false } } });
+    ch.on("broadcast", { event: "ready" }, async () => {
+      if (!stateRef.current.isCaller || offerSentRef.current) return;
+      const pc = pcRef.current; if (!pc) return;
+      offerSentRef.current = true;
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await sendOnPair("offer", { offer });
+      } catch (e) { toast("Call setup failed.", "error"); cleanup(); }
+    });
+    ch.on("broadcast", { event: "offer" }, async ({ payload }) => {
+      const pc = pcRef.current; if (!pc) return;
+      try {
+        await pc.setRemoteDescription(payload.offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await sendOnPair("answer", { answer });
+        for (const c of pendingIceRef.current) await pc.addIceCandidate(c).catch(() => {});
+        pendingIceRef.current = [];
+      } catch (e) { toast("Couldn't answer call.", "error"); cleanup(); }
+    });
+    ch.on("broadcast", { event: "answer" }, async ({ payload }) => {
+      const pc = pcRef.current; if (!pc) return;
+      try {
+        await pc.setRemoteDescription(payload.answer);
+        for (const c of pendingIceRef.current) await pc.addIceCandidate(c).catch(() => {});
+        pendingIceRef.current = [];
+      } catch {}
+    });
+    ch.on("broadcast", { event: "ice" }, async ({ payload }) => {
+      const pc = pcRef.current; if (!pc) return;
+      const candidate = new RTCIceCandidate(payload.candidate);
+      if (pc.remoteDescription && pc.remoteDescription.type) await pc.addIceCandidate(candidate).catch(() => {});
+      else pendingIceRef.current.push(candidate);
+    });
+    ch.on("broadcast", { event: "hangup" }, () => { if (stateRef.current.status !== "idle") { toast("Call ended.", "info"); cleanup(); } });
+
+    await new Promise(res => ch.subscribe(s => s === "SUBSCRIBED" && res()));
+    pairChRef.current = ch;
+  }
+
+  // ── public API ─────────────────────────────────────────────────────
+  async function start(peerId, peerName, type) {
+    if (stateRef.current.status !== "idle") return;
+    if (!peerId || peerId === user.id) { toast("Can't call yourself.", "warning"); return; }
+    if (peerId.startsWith("u") && peerId.length < 6) { toast("Demo contact — calls only work between real accounts.", "warning"); return; }
+    setState({ status: "calling", type, isCaller: true, peerId, peerName, muted: false, cameraOff: false });
+    try {
+      await openPair(peerId);                 // subscribe first so "ready" isn't missed
+      await initPeer(type);                    // getUserMedia + build PC
+      await sendToRing(peerId, "ring", { type });
+    } catch (e) {
+      toast(e.name === "NotAllowedError" ? "Microphone/camera permission denied." : "Couldn't start call.", "error");
+      cleanup();
+    }
+  }
+
+  async function accept() {
+    const { peerId, type } = stateRef.current;
+    if (!peerId) return;
+    setState({ status: "connecting" });
+    try {
+      await openPair(peerId);
+      await initPeer(type);
+      await sendOnPair("ready", {});           // tell caller we're ready
+    } catch (e) {
+      toast(e.name === "NotAllowedError" ? "Microphone/camera permission denied." : "Couldn't accept call.", "error");
+      try { await sendToRing(peerId, "decline", {}); } catch {}
+      cleanup();
+    }
+  }
+
+  async function decline() {
+    const { peerId } = stateRef.current;
+    if (peerId) { try { await sendToRing(peerId, "decline", {}); } catch {} }
+    cleanup();
+  }
+
+  async function end() {
+    if (pairChRef.current) { try { await sendOnPair("hangup", {}); } catch {} }
+    cleanup();
+  }
+
+  function toggleMute() {
+    const s = localStream; if (!s) return;
+    const t = s.getAudioTracks()[0]; if (!t) return;
+    t.enabled = !t.enabled;
+    setState({ muted: !t.enabled });
+  }
+
+  function toggleCamera() {
+    const s = localStream; if (!s) return;
+    const t = s.getVideoTracks()[0]; if (!t) return;
+    t.enabled = !t.enabled;
+    setState({ cameraOff: !t.enabled });
+  }
+
+  // ── inbound ring channel (long-lived) ──────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    const ringCh = supabase.channel(`ring:${user.id}`, { config: { broadcast: { self: false } } })
+      .on("broadcast", { event: "ring" }, async ({ payload }) => {
+        if (stateRef.current.status !== "idle") {
+          try { await sendToRing(payload.from, "decline", { reason: "busy" }); } catch {}
+          return;
+        }
+        setState({
+          status: "ringing", type: payload.type, isCaller: false,
+          peerId: payload.from, peerName: payload.fromName || "Someone",
+          muted: false, cameraOff: false,
+        });
+      })
+      .on("broadcast", { event: "decline" }, () => {
+        const s = stateRef.current.status;
+        if (s === "calling" || s === "connecting") { toast("Call declined.", "warning"); cleanup(); }
+      })
+      .subscribe();
+    return () => { try { supabase.removeChannel(ringCh); } catch {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  const value = { state, localStream, remoteStream, start, accept, decline, end, toggleMute, toggleCamera };
+  return <CallCtx.Provider value={value}>{children}<CallOverlay/></CallCtx.Provider>;
+}
+
+function CallOverlay() {
+  const call = useCall();
+  if (!call) return null;
+  const { state, accept, decline, end, toggleMute, toggleCamera, localStream, remoteStream } = call;
+  const localRef = useRef(null);
+  const remoteRef = useRef(null);
+  useEffect(() => { if (localRef.current)  localRef.current.srcObject  = localStream;  }, [localStream]);
+  useEffect(() => { if (remoteRef.current) remoteRef.current.srcObject = remoteStream; }, [remoteStream]);
+
+  if (state.status === "idle") return null;
+
+  const isRinging = state.status === "ringing";
+  const statusLine = {
+    calling:    "Ringing…",
+    ringing:    `Incoming ${state.type === "video" ? "video" : "voice"} call`,
+    connecting: "Connecting…",
+    in_call:    "Connected",
+  }[state.status];
+
   return (
-    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ maxWidth:"min(900px,95vw)", padding:0, overflow:"hidden" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:".75rem 1rem", borderBottom:"2px solid var(--ink)", background:"var(--paper2)" }}>
-          <div style={{ fontFamily:"var(--font-display)", fontSize:"1rem", letterSpacing:".04em" }}>{type === "video" ? "📹" : "📞"} {title}</div>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>✕ End</button>
+    <div className="modal-overlay" style={{ zIndex: 100 }}>
+      <div className="modal" style={{ maxWidth:"min(720px,95vw)", padding:0, overflow:"hidden" }}>
+        <div style={{ padding:".8rem 1.1rem", borderBottom:"2px solid var(--ink)", background:"var(--paper2)", display:"flex", justifyContent:"space-between", alignItems:"center", gap:".8rem" }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:"1.05rem", letterSpacing:".04em" }}>
+            {state.type === "video" ? "📹" : "📞"} {state.peerName || "Call"}
+          </div>
+          <div style={{ fontSize:".7rem", fontStyle:"italic", color:"var(--muted)" }}>{statusLine}</div>
         </div>
-        <iframe
-          src={`https://whereby.com/extracrew-${roomId}`}
-          allow="camera; microphone; fullscreen; speaker; display-capture"
-          style={{ width:"100%", height:"65vh", border:"none", display:"block" }}
-          title={`${type} call`}
-        />
+
+        {state.type === "video" && !isRinging && (
+          <div style={{ position:"relative", background:"#000", aspectRatio:"16/9", maxHeight:"60vh" }}>
+            <video ref={remoteRef} autoPlay playsInline style={{ width:"100%", height:"100%", objectFit:"cover", display:remoteStream?"block":"none" }} />
+            {!remoteStream && (
+              <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", color:"#aaa", fontFamily:"var(--font-display)", letterSpacing:".05em" }}>
+                {state.status === "in_call" ? "WAITING FOR VIDEO…" : statusLine.toUpperCase()}
+              </div>
+            )}
+            <video ref={localRef} autoPlay playsInline muted style={{ position:"absolute", bottom:12, right:12, width:160, height:120, objectFit:"cover", border:"2px solid var(--paper)", borderRadius:8, background:"#111" }} />
+          </div>
+        )}
+
+        {state.type === "audio" && !isRinging && (
+          <div style={{ padding:"2.2rem 1rem", textAlign:"center", background:"var(--chalk)" }}>
+            <div style={{ fontSize:"3rem", marginBottom:".5rem" }}>📞</div>
+            <div style={{ fontFamily:"var(--font-display)", fontSize:"1.5rem", letterSpacing:".03em" }}>{state.peerName}</div>
+            <audio ref={remoteRef} autoPlay />
+          </div>
+        )}
+
+        {isRinging && (
+          <div style={{ padding:"2.2rem 1rem", textAlign:"center", background:"var(--chalk)" }}>
+            <div style={{ fontSize:"3rem", marginBottom:".5rem" }}>{state.type === "video" ? "📹" : "📞"}</div>
+            <div style={{ fontFamily:"var(--font-display)", fontSize:"1.5rem", letterSpacing:".03em" }}>{state.peerName}</div>
+            <div style={{ fontSize:".78rem", color:"var(--muted)", marginTop:".3rem", fontStyle:"italic" }}>is calling…</div>
+          </div>
+        )}
+
+        <div style={{ padding:"1rem", display:"flex", gap:".5rem", justifyContent:"center", background:"var(--paper2)", borderTop:"2px solid var(--ink)", flexWrap:"wrap" }}>
+          {isRinging ? (
+            <>
+              <button className="btn btn-orange" onClick={accept}>✓ Accept</button>
+              <button className="btn btn-ghost" onClick={decline}>✕ Decline</button>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-ghost btn-sm" onClick={toggleMute}>{state.muted ? "🔇 Unmute" : "🎤 Mute"}</button>
+              {state.type === "video" && <button className="btn btn-ghost btn-sm" onClick={toggleCamera}>{state.cameraOff ? "📷 Camera On" : "📷 Camera Off"}</button>}
+              <button className="btn btn-orange" onClick={end}>✕ End Call</button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1913,8 +2217,13 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
   const [msgsLoading, setMsgsLoading] = useState(false);
   const [previews, setPreviews]       = useState({});     // { threadId: { text, ts } }
   const [unreadMap, setUnreadMap]     = useState({});     // { threadId: count }
+  // Per-user key. Previously this was a single global "ec:lastRead", which
+  // cross-contaminated unread state when two accounts were used in the same
+  // browser (sign out / sign in as another user → wrong unread badges on
+  // first render, sometimes hiding real new messages until a refresh).
+  const lastReadKey = `ec:lastRead_${user.id}`;
   const [lastRead, setLastRead]       = useState(() => {
-    try { return JSON.parse(localStorage.getItem("ec:lastRead") || "{}"); } catch { return {}; }
+    try { return JSON.parse(localStorage.getItem(lastReadKey) || "{}"); } catch { return {}; }
   });
   const [dmThreadList, setDmThreadList] = useState(() => {
     try { return JSON.parse(localStorage.getItem(`ec:dms_${user.id}`) || "[]"); } catch { return []; }
@@ -1924,7 +2233,6 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
   const [input, setInput]             = useState("");
   const [showDM, setShowDM]           = useState(false);
   const [dmTarget, setDmTarget]       = useState("");
-  const [callModal, setCallModal]     = useState(null);
   const [showInfo, setShowInfo]       = useState(false);
   const [uploading, setUploading]     = useState(false);
   const [profileUser, setProfileUser] = useState(null);
@@ -1933,12 +2241,24 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
   const fileRef     = useRef(null);
   const activeRef   = useRef(null);   // stale-closure-safe ref to active
   const threadChRef = useRef(null);   // current thread channel
-  const globalChRef = useRef(null);   // global unread-tracking channel
+  const myIdsRef    = useRef(new Set());
+  const loadedPreviewsRef = useRef(new Set());
+  const call = useCall();
 
   const mine = groups.filter(g => g.members.includes(user.id));
+  const mineIds = mine.map(g => g.id);
+  const dmIds   = dmThreadList.map(d => d.id);
+  // stable key so effects re-run when the set of threads (not array identity) changes
+  const threadsKey = useMemo(() => [...mineIds, ...dmIds].sort().join("|"),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mineIds.join("|"), dmIds.join("|")]);
 
-  // keep activeRef in sync
+  // keep refs in sync with current state — used by the long-lived global channel
   useEffect(() => { activeRef.current = active; }, [active]);
+  useEffect(() => {
+    myIdsRef.current = new Set([...mineIds, ...dmIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadsKey]);
 
   // auto-scroll
   useEffect(() => { endRef.current?.scrollIntoView({ behavior:"smooth" }); }, [threadMsgs]);
@@ -1949,60 +2269,99 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
     onUnreadChange?.(total);
   }, [unreadMap]);
 
-  // jump to group from MyGroups → Go to Chat
+  // jump to group from MyGroups → Go to Chat (waits for groups + mine to include it)
   useEffect(() => {
-    if (jumpGroup) {
-      const g = groups.find(x => x.id === jumpGroup);
-      if (g) openThread({ id: jumpGroup, type:"group", name:g.name });
-    }
-  }, [jumpGroup]);
+    if (!jumpGroup) return;
+    const g = groups.find(x => x.id === jumpGroup);
+    if (g && g.members.includes(user.id)) openThread({ id: jumpGroup, type:"group", name:g.name });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpGroup, groups]);
 
-  // Load sidebar previews + initial unread counts + global subscription
+  // Load sidebar previews + initial unread counts whenever the thread set changes
+  // (e.g. user joins a new group or a new DM thread is auto-added).
   useEffect(() => {
-    const allThreads = [...mine.map(g => ({ id: g.id })), ...dmThreadList];
+    const ids = [...mineIds, ...dmIds];
+    dbg("chat:threads-key", ids.length);
+    ids.forEach(id => {
+      if (loadedPreviewsRef.current.has(id)) return;
+      loadedPreviewsRef.current.add(id);
 
-    // sidebar previews: last message per thread
-    allThreads.forEach(t => {
-      supabase.from("messages").select("*").eq("thread_id", t.id)
+      supabase.from("messages").select("text, media, created_at").eq("thread_id", id)
         .order("created_at", { ascending: false }).limit(1)
         .then(({ data }) => {
           if (data?.[0]) {
             const m = data[0];
-            setPreviews(p => ({ ...p, [t.id]: { text: m.text || "📎 Media", ts: new Date(m.created_at).getTime() } }));
+            setPreviews(p => p[id] ? p : ({ ...p, [id]: { text: m.text || "📎 Media", ts: new Date(m.created_at).getTime() } }));
           }
         });
-    });
 
-    // initial unread: count messages since last open, not sent by self
-    allThreads.forEach(t => {
-      const since = lastRead[t.id] || "1970-01-01T00:00:00Z";
+      const since = lastRead[id] || "1970-01-01T00:00:00Z";
       supabase.from("messages").select("id", { count:"exact", head:true })
-        .eq("thread_id", t.id).gt("created_at", since).neq("sender_id", user.id)
-        .then(({ count }) => { if (count) setUnreadMap(p => ({ ...p, [t.id]: count })); });
+        .eq("thread_id", id).gt("created_at", since).neq("sender_id", user.id)
+        .then(({ count }) => { if (count) setUnreadMap(p => ({ ...p, [id]: (p[id] || 0) + count })); });
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadsKey]);
 
-    // global subscription for unread on non-active threads
-    const myIds = new Set(allThreads.map(t => t.id));
-    const globalCh = supabase.channel("msgs-unread-global")
-      .on("postgres_changes", { event:"INSERT", schema:"public", table:"messages" }, ({ new: msg }) => {
-        if (!myIds.has(msg.thread_id) || msg.sender_id === user.id) return;
-        if (msg.thread_id === activeRef.current?.id) return;
-        setUnreadMap(p => ({ ...p, [msg.thread_id]: (p[msg.thread_id] || 0) + 1 }));
-        setPreviews(p => ({ ...p, [msg.thread_id]: { text: msg.text || "📎 Media", ts: new Date(msg.created_at).getTime() } }));
+  // Global subscription — mounted once, uses refs so newly-joined groups and
+  // strangers' inbound DMs are picked up without a re-subscribe.
+  useEffect(() => {
+    const globalCh = supabase.channel("msgs-global-" + user.id)
+      .on("postgres_changes", { event:"INSERT", schema:"public", table:"messages" }, async ({ new: msg }) => {
+        const tid = msg.thread_id;
+        if (!tid) return;
+
+        // Always refresh the sidebar preview — including for my own sends
+        setPreviews(p => ({ ...p, [tid]: { text: msg.text || "📎 Media", ts: new Date(msg.created_at).getTime() } }));
+        if (msg.sender_id === user.id) return;
+
+        const tracked = myIdsRef.current.has(tid);
+
+        // Auto-add unknown inbound DM threads so they show up in the sidebar
+        // without requiring the recipient to start the DM first.
+        if (!tracked && tid.startsWith("dm_")) {
+          const [, a, b] = tid.split("_");
+          if (a === user.id || b === user.id) {
+            const otherId = a === user.id ? b : a;
+            const { data: other } = await supabase
+              .from("users").select("name").eq("id", otherId).maybeSingle();
+            const name = other?.name || msg.sender_name || "Unknown";
+            setDmThreadList(prev => {
+              if (prev.some(d => d.id === tid)) return prev;
+              const next = [...prev, { id: tid, name, otherId }];
+              try { localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next)); } catch {}
+              return next;
+            });
+          } else {
+            return; // not our DM, ignore
+          }
+        } else if (!tracked) {
+          return; // unknown group we don't belong to
+        }
+
+        // Bump unread unless this thread is currently open
+        if (tid !== activeRef.current?.id) {
+          setUnreadMap(p => ({ ...p, [tid]: (p[tid] || 0) + 1 }));
+        }
       })
       .subscribe();
-    globalChRef.current = globalCh;
-    return () => { supabase.removeChannel(globalCh); globalChRef.current = null; };
-  }, []); // intentionally once on mount
+    return () => { supabase.removeChannel(globalCh); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // subscribe to active thread messages
   useEffect(() => {
     if (!active) return;
+    dbg("chat:active-thread", active.id);
     if (threadChRef.current) { supabase.removeChannel(threadChRef.current); threadChRef.current = null; }
 
     setMsgsLoading(true);
     supabase.from("messages").select("*").eq("thread_id", active.id).order("created_at")
-      .then(({ data }) => { setThreadMsgs((data || []).map(normalizeMsg)); setMsgsLoading(false); });
+      .then(({ data }) => {
+        setThreadMsgs((data || []).map(normalizeMsg));
+        setMsgsLoading(false);
+        dbg("chat:messages-loaded", data?.length ?? 0);
+      });
 
     const ch = supabase.channel(`thread:${active.id}`)
       .on("postgres_changes", { event:"INSERT", schema:"public", table:"messages", filter:`thread_id=eq.${active.id}` }, ({ new: msg }) => {
@@ -2032,7 +2391,7 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
     const now = new Date().toISOString();
     setLastRead(prev => {
       const next = { ...prev, [t.id]: now };
-      localStorage.setItem("ec:lastRead", JSON.stringify(next));
+      try { localStorage.setItem(lastReadKey, JSON.stringify(next)); } catch {}
       return next;
     });
     setUnreadMap(p => ({ ...p, [t.id]: 0 }));
@@ -2070,7 +2429,7 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
       localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next));
       return next;
     });
-    openThread({ id:k, type:"dm", name:target?.name||"?" });
+    openThread({ id:k, type:"dm", name:target?.name||"?", otherId: dmTarget });
     setShowDM(false); setDmTarget("");
   }
 
@@ -2175,8 +2534,17 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
               </div>
               <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:".35rem", flexWrap:"wrap" }}>
                 {activeGroup && activeGroup.tags.slice(0,2).map(t=><span key={t} className="tag" style={{fontSize:".58rem"}}>{t}</span>)}
-                <button className="btn btn-ghost btn-sm" onClick={() => setCallModal({ type:"video", roomId:active.id, title:active.name })} title="Video call">📹</button>
-                <button className="btn btn-ghost btn-sm" onClick={() => setCallModal({ type:"audio", roomId:active.id, title:active.name })} title="Voice call">📞</button>
+                {active.type === "dm" ? (
+                  <>
+                    <button className="btn btn-ghost btn-sm" onClick={() => call.start(active.otherId, active.name, "video")} title="Video call" disabled={call.state.status !== "idle"}>📹</button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => call.start(active.otherId, active.name, "audio")} title="Voice call" disabled={call.state.status !== "idle"}>📞</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="btn btn-ghost btn-sm" title="Group video call — coming soon" disabled style={{ opacity:.45 }}>📹</button>
+                    <button className="btn btn-ghost btn-sm" title="Group voice call — coming soon" disabled style={{ opacity:.45 }}>📞</button>
+                  </>
+                )}
                 {activeGroup && <button className="btn btn-ghost btn-sm" onClick={() => setShowInfo(v=>!v)} title="Group info">⋯</button>}
               </div>
             </div>
@@ -2248,7 +2616,6 @@ function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange }) {
           </div>
         </div>
       )}
-      {callModal && <CallModal title={callModal.title} roomId={callModal.roomId} type={callModal.type} onClose={() => setCallModal(null)}/>}
       {profileUser && <UserProfileModal userId={profileUser.id} onClose={() => setProfileUser(null)}/>}
     </div>
   );
@@ -2737,8 +3104,22 @@ function AppShell() {
   // Load groups only after user session is confirmed (avoids unauthed Supabase calls)
   useEffect(() => {
     if (!user) return;
+    dbg("groups:fetch-start");
     supabase.from("groups").select("*").order("created_at", { ascending: false })
-      .then(({ data }) => setGroups(data?.length ? data : SEED_GROUPS));
+      .then(({ data, error }) => {
+        if (error) {
+          // Don't fall back to SEED_GROUPS on error — that masks real network/RLS
+          // failures by rendering stale fixture data and confusing the user.
+          // Render with empty groups; the lobby's empty state is correct here.
+          // eslint-disable-next-line no-console
+          console.warn("[ec] groups fetch failed:", error.message);
+          setGroups([]);
+          return;
+        }
+        // Seed only when the table is genuinely empty (e.g. fresh dev DB).
+        setGroups(data?.length ? data : SEED_GROUPS);
+        dbg("groups:loaded", data?.length ?? 0);
+      });
 
     const ch = supabase.channel("groups-rt")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "groups" }, ({ new: g }) =>
@@ -2783,7 +3164,10 @@ function AppShell() {
     <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column", position:"relative" }}>
       <SiteBackground tier={bgTier} />
       <header className="page-surface" style={{ borderBottom:"2px solid var(--ink)", background:"var(--paper)", position:"sticky", top:0, zIndex:50, flexShrink:0 }}>
-        <div style={{ maxWidth:fullPage?"100%":1160, margin:"0 auto", padding:"0 1.4rem", height:58, display:"flex", alignItems:"center", gap:"1.4rem" }}>
+        {/* Header inner container is ALWAYS the same max-width regardless of page —
+            previously this flipped to 100% on the chat page, yanking the EXTRA CREW
+            logo + nav to the viewport edge and causing a visible header shift. */}
+        <div style={{ maxWidth:1160, margin:"0 auto", padding:"0 1.4rem", height:58, display:"flex", alignItems:"center", gap:"1.4rem" }}>
           <div onClick={() => { setLobbyFilter("all"); setPage("lobby"); }} style={{ cursor:"pointer", flexShrink:0, display:"flex", alignItems:"baseline" }}>
             <span style={{ fontFamily:"var(--font-display)", fontSize:"1.35rem", letterSpacing:".05em" }}>EXTRA</span>
             <span style={{ fontFamily:"var(--font-display)", fontSize:"1.35rem", letterSpacing:".05em", color:"var(--orange)" }}>CREW</span>
@@ -2835,7 +3219,9 @@ export default function Page() {
   return (
     <AuthProvider>
       <ToastProvider>
-        <AppShell/>
+        <CallProvider>
+          <AppShell/>
+        </CallProvider>
       </ToastProvider>
     </AuthProvider>
   );
