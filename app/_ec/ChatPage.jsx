@@ -13,6 +13,39 @@ import {
 import { useCall } from "./CallSystem";
 import UserProfileModal from "./UserProfileModal";
 
+const DEMO_USER_IDS = new Set(MOCK_USERS.map(u => u.id));
+const normalizeUserId = (id) => (typeof id === "string" ? id.trim() : "");
+const isDemoUserId = (id) => DEMO_USER_IDS.has(normalizeUserId(id));
+const dmKeyFor = (aId, bId) => "dm_" + [normalizeUserId(aId), normalizeUserId(bId)].sort().join("_");
+const parseDmThreadId = (threadId) => {
+  const id = normalizeUserId(threadId);
+  if (!id.startsWith("dm_")) return null;
+  const parts = id.slice(3).split("_").filter(Boolean);
+  return parts.length === 2 ? parts : null;
+};
+const otherIdFromDmThread = (threadId, currentUserId) => {
+  const parts = parseDmThreadId(threadId);
+  if (!parts) return "";
+  const current = normalizeUserId(currentUserId);
+  if (parts[0] === current) return parts[1];
+  if (parts[1] === current) return parts[0];
+  return "";
+};
+const sameDmList = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function normalizeDmThread(raw, currentUserId, realUserMap = new Map()) {
+  const rawOtherId = normalizeUserId(raw?.otherId);
+  const parsedOtherId = otherIdFromDmThread(raw?.id, currentUserId);
+  const otherId = rawOtherId || parsedOtherId;
+  if (!otherId || otherId === currentUserId) return null;
+
+  const id = dmKeyFor(currentUserId, otherId);
+  const realUser = realUserMap.get(otherId);
+  const isDemo = realUser ? false : Boolean(raw?.isDemo ?? isDemoUserId(otherId));
+  const name = realUser?.name || realUser?.email || raw?.name || MOCK_USERS.find(u => u.id === otherId)?.name || "Member";
+  return { id, name, otherId, isDemo };
+}
+
 function NicknameEditor({ current, onSave, onCancel }) {
   const [v, setV] = useState(current);
   return (
@@ -272,7 +305,12 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
     try { return JSON.parse(localStorage.getItem(lastReadKey) || "{}"); } catch { return {}; }
   });
   const [dmThreadList, setDmThreadList] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(`ec:dms_${user.id}`) || "[]"); } catch { return []; }
+    try {
+      const raw = JSON.parse(localStorage.getItem(`ec:dms_${user.id}`) || "[]");
+      return Array.isArray(raw)
+        ? raw.map(d => normalizeDmThread(d, user.id)).filter(Boolean)
+        : [];
+    } catch { return []; }
   });
 
   const [active, setActive]           = useState(null);
@@ -295,6 +333,7 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
   const mine = groups.filter(g => g.members.includes(user.id));
   const mineIds = mine.map(g => g.id);
   const dmIds   = dmThreadList.map(d => d.id);
+  const realUserMap = useMemo(() => new Map(realUsers.map(u => [u.id, u])), [realUsers]);
   const threadsKey = useMemo(() => [...mineIds, ...dmIds].sort().join("|"),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [mineIds.join("|"), dmIds.join("|")]);
@@ -306,6 +345,15 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
   }, [threadsKey]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior:"smooth" }); }, [threadMsgs]);
+
+  useEffect(() => {
+    setDmThreadList(prev => {
+      const next = prev.map(d => normalizeDmThread(d, user.id, realUserMap)).filter(Boolean);
+      if (sameDmList(prev, next)) return prev;
+      try { localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [realUserMap, user.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -377,15 +425,16 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
         const tracked = myIdsRef.current.has(tid);
 
         if (!tracked && tid.startsWith("dm_")) {
-          const [, a, b] = tid.split("_");
-          if (a === user.id || b === user.id) {
-            const otherId = a === user.id ? b : a;
+          const otherId = otherIdFromDmThread(tid, user.id);
+          if (otherId) {
             const { data: other } = await supabase
               .from("users").select("name").eq("id", otherId).maybeSingle();
             const name = other?.name || msg.sender_name || "Unknown";
             setDmThreadList(prev => {
               if (prev.some(d => d.id === tid)) return prev;
-              const next = [...prev, { id: tid, name, otherId }];
+              const nextThread = normalizeDmThread({ id: tid, name, otherId, isDemo: false }, user.id, realUserMap);
+              if (!nextThread) return prev;
+              const next = [...prev, nextThread];
               try { localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next)); } catch {}
               return next;
             });
@@ -452,7 +501,6 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
     setUnreadMap(p => ({ ...p, [t.id]: 0 }));
   }
 
-  function dmKey(aId, bId) { return "dm_" + [aId,bId].sort().join("_"); }
   function canSend(t) {
     if (!t) return false;
     if (t.type === "group") return groups.find(g=>g.id===t.id)?.members.includes(user.id);
@@ -476,16 +524,25 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
 
   function startDM() {
     if (!dmTarget) return;
-    const k = dmKey(user.id, dmTarget);
-    const target = realUsers.find(u => u.id === dmTarget) || MOCK_USERS.find(u => u.id === dmTarget);
+    const targetId = normalizeUserId(dmTarget);
+    const realTarget = realUserMap.get(targetId);
+    const demoTarget = MOCK_USERS.find(u => u.id === targetId);
+    if (!realTarget && !demoTarget) {
+      toast("Could not find that user.", "error");
+      return;
+    }
+    const k = dmKeyFor(user.id, targetId);
+    const target = realTarget || demoTarget;
     const targetName = target?.name || target?.email || "?";
+    const isDemo = !realTarget && isDemoUserId(targetId);
+    const nextThread = { id:k, name:targetName, otherId:targetId, isDemo };
     setDmThreadList(prev => {
       if (prev.some(dt => dt.id === k)) return prev;
-      const next = [...prev, { id:k, name:targetName, otherId:dmTarget }];
+      const next = [...prev, nextThread];
       try { localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next)); } catch {}
       return next;
     });
-    openThread({ id:k, type:"dm", name:targetName, otherId: dmTarget });
+    openThread({ ...nextThread, type:"dm" });
     setShowDM(false); setDmTarget("");
   }
 
@@ -521,12 +578,15 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
     ts:      previews[g.id]?.ts   || (g.created_at ? new Date(g.created_at).getTime() : g.ts || 0),
     unread:  unreadMap[g.id] || 0,
   }));
-  const dmThreadsView  = dmThreadList.map(dt => ({
-    ...dt, type:"dm",
-    preview: previews[dt.id]?.text || "",
-    ts:      previews[dt.id]?.ts   || 0,
-    unread:  unreadMap[dt.id] || 0,
-  }));
+  const dmThreadsView  = dmThreadList
+    .map(dt => normalizeDmThread(dt, user.id, realUserMap))
+    .filter(Boolean)
+    .map(dt => ({
+      ...dt, type:"dm",
+      preview: previews[dt.id]?.text || "",
+      ts:      previews[dt.id]?.ts   || 0,
+      unread:  unreadMap[dt.id] || 0,
+    }));
 
   return (
     <div className="chat-layout">

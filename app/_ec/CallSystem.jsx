@@ -20,14 +20,34 @@
 
 import { useState, useEffect, useRef, createContext, useContext, useCallback } from "react";
 import { supabase, useAuth, useToast } from "./shared";
+import { MOCK_USERS } from "@/lib/data";
 
 export const CallCtx = createContext(null);
 export const useCall = () => useContext(CallCtx);
 
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
+const DEMO_USER_IDS = new Set(MOCK_USERS.map(u => u.id));
+const envList = (value) => (value || "").split(",").map(v => v.trim()).filter(Boolean);
+const buildIceServers = () => {
+  const stunUrls = envList(process.env.NEXT_PUBLIC_STUN_URLS);
+  const turnUrls = envList(process.env.NEXT_PUBLIC_TURN_URLS);
+  const turnUsername = process.env.NEXT_PUBLIC_TURN_USERNAME || "";
+  const turnCredential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL || "";
+  const servers = [
+    { urls: stunUrls.length ? stunUrls : ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+  ];
+  if (turnUrls.length && turnUsername && turnCredential) {
+    servers.push({ urls: turnUrls, username: turnUsername, credential: turnCredential });
+  }
+  return servers;
+};
+
+const ICE_SERVERS = buildIceServers();
+const HAS_TURN_SERVER = ICE_SERVERS.some(server =>
+  Array.isArray(server.urls)
+    ? server.urls.some(url => url.startsWith("turn:") || url.startsWith("turns:"))
+    : String(server.urls || "").startsWith("turn")
+);
+const isDemoUserId = (id) => DEMO_USER_IDS.has(typeof id === "string" ? id.trim() : "");
 const CHANNEL_SUBSCRIBE_TIMEOUT_MS = 5000;
 const CALL_ANSWER_TIMEOUT_MS = 30000;
 
@@ -130,7 +150,10 @@ export function CallProvider({ children }) {
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
       if (s === "connected") setState({ status: "in_call" });
-      if ((s === "failed" || s === "disconnected" || s === "closed") && stateRef.current.status !== "idle") cleanup();
+      if ((s === "failed" || s === "disconnected" || s === "closed") && stateRef.current.status !== "idle") {
+        if (s === "failed" && !HAS_TURN_SERVER) toast("Call connection failed. Add TURN credentials for stricter networks.", "warning");
+        cleanup();
+      }
     };
     return pc;
   }
@@ -180,10 +203,15 @@ export function CallProvider({ children }) {
     pairChRef.current = ch;
   }
 
-  async function start(peerId, peerName, type) {
+  async function start(peerId, peerName, type, options = {}) {
     if (stateRef.current.status !== "idle") return;
     if (!peerId || peerId === user.id) { toast("Can't call yourself.", "warning"); return; }
+    const originalPeerId = peerId;
+    const demoPeer = options.isDemo === true || (options.isDemo !== false && isDemoUserId(peerId));
+    if (demoPeer) { toast("Demo contact - calls only work between real accounts.", "warning"); return; }
+    peerId = `real:${peerId}`;
     if (peerId.startsWith("u") && peerId.length < 6) { toast("Demo contact — calls only work between real accounts.", "warning"); return; }
+    peerId = originalPeerId;
     setState({ status: "calling", type, isCaller: true, peerId, peerName, muted: false, cameraOff: false });
     try {
       await openPair(peerId);
