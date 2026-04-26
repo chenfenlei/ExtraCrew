@@ -282,6 +282,7 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
   const [showInfo, setShowInfo]       = useState(false);
   const [uploading, setUploading]     = useState(false);
   const [profileUser, setProfileUser] = useState(null);
+  const [realUsers, setRealUsers]     = useState([]);
 
   const endRef      = useRef(null);
   const fileRef     = useRef(null);
@@ -305,6 +306,28 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
   }, [threadsKey]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior:"smooth" }); }, [threadMsgs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase.from("users").select("id,name,email").neq("id", user.id).order("name").limit(100)
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          // eslint-disable-next-line no-console
+          console.warn("[ec] users fetch failed:", error.message);
+          setRealUsers([]);
+          return;
+        }
+        setRealUsers((data || []).filter(u => u?.id && u.id !== user.id));
+      })
+      .catch(err => {
+        if (cancelled) return;
+        // eslint-disable-next-line no-console
+        console.warn("[ec] users fetch threw:", err?.message || err);
+        setRealUsers([]);
+      });
+    return () => { cancelled = true; };
+  }, [user.id]);
 
   useEffect(() => {
     const total = Object.values(unreadMap).reduce((s, n) => s + n, 0);
@@ -454,14 +477,15 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
   function startDM() {
     if (!dmTarget) return;
     const k = dmKey(user.id, dmTarget);
-    const target = MOCK_USERS.find(u => u.id === dmTarget);
+    const target = realUsers.find(u => u.id === dmTarget) || MOCK_USERS.find(u => u.id === dmTarget);
+    const targetName = target?.name || target?.email || "?";
     setDmThreadList(prev => {
       if (prev.some(dt => dt.id === k)) return prev;
-      const next = [...prev, { id:k, name:target?.name||"?", otherId:dmTarget }];
-      localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next));
+      const next = [...prev, { id:k, name:targetName, otherId:dmTarget }];
+      try { localStorage.setItem(`ec:dms_${user.id}`, JSON.stringify(next)); } catch {}
       return next;
     });
-    openThread({ id:k, type:"dm", name:target?.name||"?", otherId: dmTarget });
+    openThread({ id:k, type:"dm", name:targetName, otherId: dmTarget });
     setShowDM(false); setDmTarget("");
   }
 
@@ -633,7 +657,14 @@ export default function ChatPage({ groups, setGroups, jumpGroup, onUnreadChange 
             <label>Select a User</label>
             <select value={dmTarget} onChange={e=>setDmTarget(e.target.value)}>
               <option value="">Choose someone…</option>
-              {MOCK_USERS.filter(u=>u.id!==user.id).map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+              {realUsers.length > 0 && (
+                <optgroup label="Real users">
+                  {realUsers.map(u => <option key={u.id} value={u.id}>{u.name || u.email || "Member"}</option>)}
+                </optgroup>
+              )}
+              <optgroup label="Demo contacts">
+                {MOCK_USERS.filter(u=>u.id!==user.id).map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+              </optgroup>
             </select>
             <div style={{ display:"flex", gap:".6rem", marginTop:"1.2rem", justifyContent:"flex-end" }}>
               <button className="btn btn-ghost" onClick={()=>setShowDM(false)}>Cancel</button>

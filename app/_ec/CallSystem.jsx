@@ -28,6 +28,9 @@ const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
 ];
+const CHANNEL_SUBSCRIBE_TIMEOUT_MS = 5000;
+const CALL_ANSWER_TIMEOUT_MS = 30000;
+
 export const pairName = (a, b) => "call-pair:" + [a, b].sort().join(":");
 
 export function CallProvider({ children }) {
@@ -59,12 +62,39 @@ export function CallProvider({ children }) {
   const pairChRef     = useRef(null);
   const pendingIceRef = useRef([]);
   const offerSentRef  = useRef(false);
+  const callTimeoutRef = useRef(null);
+
+  function clearCallTimeout() {
+    if (callTimeoutRef.current) {
+      clearTimeout(callTimeoutRef.current);
+      callTimeoutRef.current = null;
+    }
+  }
+
+  function waitForSubscribed(ch, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} subscribe timed out`)), CHANNEL_SUBSCRIBE_TIMEOUT_MS);
+      ch.subscribe(status => {
+        if (status === "SUBSCRIBED") {
+          clearTimeout(timer);
+          resolve();
+        }
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+          clearTimeout(timer);
+          reject(new Error(`${label} subscribe failed: ${status}`));
+        }
+      });
+    });
+  }
 
   async function sendToRing(toUserId, event, payload = {}) {
     const ch = supabase.channel(`ring:${toUserId}`);
-    await new Promise(res => ch.subscribe(s => s === "SUBSCRIBED" && res()));
-    await ch.send({ type: "broadcast", event, payload: { ...payload, from: user.id, fromName: user.name } });
-    supabase.removeChannel(ch);
+    try {
+      await waitForSubscribed(ch, "ring");
+      await ch.send({ type: "broadcast", event, payload: { ...payload, from: user.id, fromName: user.name } });
+    } finally {
+      supabase.removeChannel(ch);
+    }
   }
 
   async function sendOnPair(event, payload = {}) {
@@ -74,6 +104,7 @@ export function CallProvider({ children }) {
   }
 
   function cleanup() {
+    clearCallTimeout();
     try { pcRef.current?.close(); } catch {}
     pcRef.current = null;
     if (pairChRef.current) { try { supabase.removeChannel(pairChRef.current); } catch {} pairChRef.current = null; }
@@ -85,6 +116,7 @@ export function CallProvider({ children }) {
   }
 
   async function initPeer(type) {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("MEDIA_UNSUPPORTED");
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pcRef.current = pc;
 
@@ -109,6 +141,8 @@ export function CallProvider({ children }) {
       if (!stateRef.current.isCaller || offerSentRef.current) return;
       const pc = pcRef.current; if (!pc) return;
       offerSentRef.current = true;
+      clearCallTimeout();
+      setState({ status: "connecting" });
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -142,7 +176,7 @@ export function CallProvider({ children }) {
     });
     ch.on("broadcast", { event: "hangup" }, () => { if (stateRef.current.status !== "idle") { toast("Call ended.", "info"); cleanup(); } });
 
-    await new Promise(res => ch.subscribe(s => s === "SUBSCRIBED" && res()));
+    await waitForSubscribed(ch, "call");
     pairChRef.current = ch;
   }
 
@@ -155,8 +189,14 @@ export function CallProvider({ children }) {
       await openPair(peerId);
       await initPeer(type);
       await sendToRing(peerId, "ring", { type });
+      callTimeoutRef.current = setTimeout(() => {
+        if (stateRef.current.status === "calling") {
+          toast("No answer. They may be offline.", "warning");
+          cleanup();
+        }
+      }, CALL_ANSWER_TIMEOUT_MS);
     } catch (e) {
-      toast(e.name === "NotAllowedError" ? "Microphone/camera permission denied." : "Couldn't start call.", "error");
+      toast(e.name === "NotAllowedError" ? "Microphone/camera permission denied." : e.message === "MEDIA_UNSUPPORTED" ? "Calls are not supported in this browser." : "Couldn't start call.", "error");
       cleanup();
     }
   }
@@ -170,7 +210,7 @@ export function CallProvider({ children }) {
       await initPeer(type);
       await sendOnPair("ready", {});
     } catch (e) {
-      toast(e.name === "NotAllowedError" ? "Microphone/camera permission denied." : "Couldn't accept call.", "error");
+      toast(e.name === "NotAllowedError" ? "Microphone/camera permission denied." : e.message === "MEDIA_UNSUPPORTED" ? "Calls are not supported in this browser." : "Couldn't accept call.", "error");
       try { await sendToRing(peerId, "decline", {}); } catch {}
       cleanup();
     }
